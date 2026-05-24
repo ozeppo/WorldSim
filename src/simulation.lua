@@ -1,5 +1,9 @@
 local Agent = require("src.entities.agent")
 local Community = require("src.entities.community")
+local Nation = require("src.entities.nation")
+local NationAI = require("src.ai.nation_ai")
+local Building = require("src.systems.building")
+local Resources = require("src.systems.resources")
 local World = require("src.world")
 
 local Simulation = {}
@@ -7,7 +11,7 @@ Simulation.__index = Simulation
 
 local CELL = 6
 local MIN_ZOOM = 0.18
-local PROJECT_DURATION = math.random(40, 80)
+local PROJECT_DURATION = 200
 local PROJECT_CHECK_INTERVAL = 6
 
 local function cellKey(x, y)
@@ -22,16 +26,25 @@ function Simulation.new(config)
         nextId = 1,
         tick = 0,
         tickStep = config.tickStep or 0.18,
+        agentProductivity = config.agentProductivity or 1,
+        diseaseEnabled = config.diseaseEnabled ~= false,
+        economyEnabled = config.economyEnabled ~= false,
         accumulator = 0,
         populationCap = config.populationCap or 230,
         spatial = {},
         communities = {},
         nextCommunityId = 1,
+        nations = {},
+        nextNationId = 1,
+        nextNationFoundingTick = 160,
         claims = {},
         claimEdges = {},
         borderPairs = {},
         buildingsByType = {},
+        tradeRoutes = {},
+        nextTradeRouteId = 1,
         selectedCommunityId = nil,
+        selectedAgentId = nil,
         camera = {
             x = 0,
             y = 0,
@@ -143,9 +156,11 @@ function Simulation:mousepressed(x, y, button)
     if button == 1 then
         self:selectCommunityAtScreen(x, y)
     elseif button == 2 or button == 3 then
-        self.camera.dragging = true
-        self.camera.lastX = x
-        self.camera.lastY = y
+        if not self:selectAgentAtScreen(x, y) then
+            self.camera.dragging = true
+            self.camera.lastX = x
+            self.camera.lastY = y
+        end
     end
 end
 
@@ -179,6 +194,43 @@ function Simulation:selectCommunityAtScreen(x, y)
     self.selectedCommunityId = claim and claim.communityId or nil
 end
 
+function Simulation:agentById(id)
+    if not id then
+        return nil
+    end
+    for _, agent in ipairs(self.agents) do
+        if agent.id == id and agent.alive then
+            return agent
+        end
+    end
+    return nil
+end
+
+function Simulation:selectAgentAtScreen(x, y)
+    local _, wh = love.graphics.getDimensions()
+    if y > wh - 146 then
+        return false
+    end
+
+    local tx, ty = self:screenToTile(x, y)
+    local best
+    local bestD = 2.25
+    for _, agent in ipairs(self:nearAgents(tx, ty, 2, nil)) do
+        if agent.alive then
+            local dx = agent.x - tx
+            local dy = agent.y - ty
+            local d = dx * dx + dy * dy
+            if d < bestD then
+                best = agent
+                bestD = d
+            end
+        end
+    end
+
+    self.selectedAgentId = best and best.id or nil
+    return best ~= nil
+end
+
 function Simulation:addAgent(x, y, initial)
     local agent = Agent.new(self.nextId, x, y)
     self.nextId = self.nextId + 1
@@ -197,7 +249,7 @@ function Simulation:getBuilding(id)
 end
 
 function Simulation:rebuildBuildingLists()
-    self.buildingsByType = { house = {}, farm = {}, paddock = {}, mine = {}, warehouse = {}, shrine = {} }
+    self.buildingsByType = { house = {}, farm = {}, paddock = {}, mine = {}, warehouse = {}, shrine = {}, port = {} }
     for _, building in ipairs(self.world.buildings) do
         if building.active ~= false then
             local list = self.buildingsByType[building.type]
@@ -437,8 +489,9 @@ function Simulation:destroyBuilding(building, attacker)
     self:rebuildBuildingLists()
     self:rebuildClaimsFromBuildings()
     self.world:rebuildInfluenceCaches()
-    self.world:markIndexDirty("build")
+    self.world:markIndexDirty()
     Community.recount(self)
+    Nation.recount(self)
     self.world:recount()
     return true
 end
@@ -490,9 +543,88 @@ function Simulation:cleanupEmptyCommunities()
     self:rebuildBuildingLists()
     self:rebuildClaimsFromBuildings()
     self.world:rebuildInfluenceCaches()
-    self.world:markIndexDirty("build")
+    self.world:markIndexDirty()
     self.world:recount()
+    Nation.recount(self)
     return true
+end
+
+local function settlementFoundingScore(community)
+    local store = community.store or {}
+    local food = (store.food or 0) + (store.animals or 0) * 1.8
+    local material = (store.wood or 0) + (store.stone or 0) + (store.iron or 0) * 1.8
+    return (community.members or 0) * 2.2
+        + (community.avgProsperity or 0) * 1.4
+        + (community.houses or 0) * 5
+        + (community.farms or 0) * 7
+        + (community.paddocks or 0) * 7
+        + (community.mines or 0) * 5
+        + food * 0.22
+        + material * 0.18
+end
+
+function Simulation:updateNationMembership()
+    Nation.recount(self)
+
+    local changed = false
+    for _, community in pairs(self.communities) do
+        if community.nationId and not self.nations[community.nationId] then
+            community.nationId = nil
+            changed = true
+        end
+    end
+
+    Nation.recount(self)
+
+    for _, community in pairs(self.communities) do
+        if not community.nationId and community.hasWarehouse and (community.members or 0) > 0 then
+            local bestNation
+            local bestScore = -math.huge
+            if community.parentNationCandidate and self.nations[community.parentNationCandidate] then
+                bestNation = self.nations[community.parentNationCandidate]
+                bestScore = Nation.joinScore(self, community, bestNation) + 16
+            end
+            for _, nation in pairs(self.nations) do
+                local score = Nation.joinScore(self, community, nation)
+                if score > bestScore then
+                    bestNation = nation
+                    bestScore = score
+                end
+            end
+            if bestNation and bestScore >= 20 then
+                community.nationId = bestNation.id
+                community.parentNationCandidate = nil
+                bestNation.project.timer = math.min(bestNation.project.timer or 0, 12)
+                changed = true
+            end
+        end
+    end
+
+    if changed then
+        Nation.recount(self)
+    end
+
+    if self.tick < (self.nextNationFoundingTick or 0) then
+        return
+    end
+
+    local founder
+    local bestFoundingScore = -math.huge
+    for _, community in pairs(self.communities) do
+        if Nation.canFound(community) then
+            local score = settlementFoundingScore(community)
+            if score > bestFoundingScore then
+                founder = community
+                bestFoundingScore = score
+            end
+        end
+    end
+
+    if founder then
+        Nation.create(self, founder)
+        self.nextNationFoundingTick = self.tick + 220
+        Nation.recount(self)
+    end
 end
 
 function Simulation:updateProsperity()
@@ -506,13 +638,15 @@ function Simulation:updateProsperity()
         end
         local housing = agent.homeId and 100 or (agent.communityId and 35 or 0)
         local spiritualPenalty = math.max(0, 45 - (agent.spirituality or 100)) * 0.28
-        agent.personalProsperity = math.max(0, math.min(70, survival * 0.46 + inventory * 0.14 + housing * 0.10 - spiritualPenalty))
+        local morale = ((agent.satisfaction or 50) * 0.62 + (agent.purpose or 35) * 0.38)
+        agent.personalProsperity = math.max(0, math.min(70, survival * 0.40 + inventory * 0.13 + housing * 0.10 + morale * 0.08 - spiritualPenalty))
     end
 
     Community.recount(self)
     if self:cleanupEmptyCommunities() then
         Community.recount(self)
     end
+    self:updateNationMembership()
 
     for _, agent in ipairs(self.agents) do
         local community = agent.communityId and self.communities[agent.communityId]
@@ -520,6 +654,7 @@ function Simulation:updateProsperity()
         agent.communityProsperity = communityBonus
         agent.prosperity = math.max(0, math.min(100, (agent.personalProsperity or 0) + communityBonus))
     end
+    self:updateNationMembership()
 end
 
 function Simulation:rebuildSpatial()
@@ -568,17 +703,26 @@ function Simulation:foundCommunityFromWarehouse(agent, building, contributors, p
         return building.communityId
     end
 
-    local communityId = Community.create(self, building.x, building.y, agent)
+    local parentNationId = parentCommunityId
+        and self.communities[parentCommunityId]
+        and self.communities[parentCommunityId].nationId
+        or nil
+    local communityId = Community.create(self, building.x, building.y, agent, nil)
     building.communityId = communityId
     local community = self.communities[communityId]
+    community.parentNationCandidate = parentNationId
     community.hasWarehouse = true
     community.warehouses = 1
     community.store = community.store or { food = 0, wood = 0, stone = 0, iron = 0, animals = 0 }
-    community.project = { kind = "housing", timer = 0, targetCommunityId = nil }
-    community.mood = "housing"
+    community.project = { kind = "micro", timer = 0, targetCommunityId = nil }
+    community.mood = "micro"
     if parentCommunityId and self.communities[parentCommunityId] then
         community.relations[parentCommunityId] = 72
         self.communities[parentCommunityId].relations[communityId] = 72
+        if parentNationId and self.nations[parentNationId] then
+            local nation = self.nations[parentNationId]
+            nation.project.timer = 0
+        end
     end
 
     self:joinCommunity(agent, communityId)
@@ -605,6 +749,8 @@ function Simulation:foundCommunityFromWarehouse(agent, building, contributors, p
         end
     end
 
+    Community.recount(self)
+    Nation.recount(self)
     return communityId
 end
 
@@ -619,7 +765,7 @@ function Simulation:formOrJoinCommunity(agent, target)
         if nearbyHouse and nearbyHouse.communityId then
             local dx = nearbyHouse.x - agent.x
             local dy = nearbyHouse.y - agent.y
-            if dx * dx + dy * dy <= 100 then
+            if dx * dx + dy * dy <= 576 then
                 return self:joinCommunity(agent, nearbyHouse.communityId)
             end
         end
@@ -630,7 +776,8 @@ function Simulation:formOrJoinCommunity(agent, target)
         for _, other in ipairs(nearby) do
             local community = other.communityId and self.communities[other.communityId]
             if community then
-                local score = agent.memory:trust(other.id) + community.houses * 5 + community.farms * 2 - community.members * 0.8
+                local freeHousing = math.max(0, (community.houses or 0) * 2 - (community.members or 0))
+                local score = agent.memory:trust(other.id) + community.houses * 5 + community.farms * 2 + freeHousing * 4 - community.members * 0.18
                 if score > bestScore then
                     bestCommunity = community.id
                     bestScore = score
@@ -674,7 +821,8 @@ function Simulation:migrateAgent(agent, target)
     for _, other in ipairs(nearby) do
         local community = other.communityId and self.communities[other.communityId]
         if community and other.communityId ~= agent.communityId then
-            local score = agent.memory:trust(other.id) + community.houses * 6 + community.farms * 4 - community.members
+            local freeHousing = math.max(0, (community.houses or 0) * 2 - (community.members or 0))
+            local score = agent.memory:trust(other.id) + community.houses * 6 + community.farms * 4 + freeHousing * 5 - community.members * 0.22
             if score > bestScore then
                 best = other
                 bestScore = score
@@ -687,6 +835,17 @@ function Simulation:migrateAgent(agent, target)
     end
 
     if agent.communityId then
+        local community = self.communities[agent.communityId]
+        local crowded = #self:nearAgents(agent.x, agent.y, 7, agent.id) > 18
+        if community
+            and community.hasWarehouse
+            and crowded
+            and (community.members or 0) >= 18
+            and (agent.prosperity or 0) > 38
+            and self.startAgentExploration
+            and self:startAgentExploration(agent) then
+            return true
+        end
         self:leaveCommunity(agent)
         return true
     end
@@ -698,6 +857,33 @@ function Simulation:communityCount()
     return Community.count(self)
 end
 
+function Simulation:nationCount()
+    return Nation.count(self)
+end
+
+function Simulation:nationForCommunity(communityId)
+    local community = communityId and self.communities[communityId]
+    return community and community.nationId and self.nations[community.nationId] or nil
+end
+
+function Simulation:assignNationTask(agent, data)
+    local community = agent and agent.communityId and self.communities[agent.communityId]
+    if not community then
+        return nil
+    end
+    local nation = community.nationId and self.nations[community.nationId]
+    if nation then
+        return NationAI.assignAgent(agent, self, nation, data or {})
+    end
+    return NationAI.assignSettlementAgent(agent, self, community, data or {})
+end
+
+function Simulation:releaseCivicTask(agent)
+    if NationAI.releaseAgentTask then
+        NationAI.releaseAgentTask(agent, self)
+    end
+end
+
 function Simulation:claimKey(x, y)
     return x .. "," .. y
 end
@@ -705,6 +891,8 @@ end
 local function claimRadiusFor(building)
     if building.type == "warehouse" or building.type == "shrine" then
         return 5
+    elseif building.type == "port" then
+        return 4
     elseif building.type == "house" then
         return 3
     elseif building.type == "farm" or building.type == "paddock" or building.type == "mine" then
@@ -723,12 +911,14 @@ function Simulation:refreshClaimVisuals()
     local claimCount = 0
     for _, community in pairs(self.communities) do
         community.claims = {}
+        community.claimCount = 0
     end
 
     for key, claim in pairs(self.claims) do
         local community = self.communities[claim.communityId]
         if community then
             community.claims[key] = true
+            community.claimCount = (community.claimCount or 0) + 1
             claimCount = claimCount + 1
         end
     end
@@ -833,6 +1023,7 @@ function Simulation:onBuildingBuilt(building)
     self.world:rebuildInfluenceCaches()
     self.world:markIndexDirty("build")
     Community.recount(self)
+    Nation.recount(self)
     local community = building.communityId and self.communities[building.communityId]
     if community and community.project then
         community.project.timer = 0
@@ -851,6 +1042,15 @@ function Simulation:relation(a, b)
     return ca.relations[b]
 end
 
+function Simulation:borderConflict(a, b)
+    if not a or not b or a == b then
+        return 0
+    end
+    local left = math.min(a, b)
+    local right = math.max(a, b)
+    return self.borderPairs[left .. ":" .. right] or 0
+end
+
 function Simulation:adjustRelation(a, b, amount)
     if not a or not b or a == b then
         return
@@ -862,6 +1062,14 @@ function Simulation:adjustRelation(a, b, amount)
     end
     ca.relations[b] = math.max(-100, math.min(100, (ca.relations[b] or 0) + amount))
     cb.relations[a] = math.max(-100, math.min(100, (cb.relations[a] or 0) + amount))
+    if ca.nationId and cb.nationId and ca.nationId ~= cb.nationId then
+        local na = self.nations[ca.nationId]
+        local nb = self.nations[cb.nationId]
+        if na and nb then
+            na.relations[cb.nationId] = math.max(-100, math.min(100, (na.relations[cb.nationId] or 0) + amount * 0.7))
+            nb.relations[ca.nationId] = math.max(-100, math.min(100, (nb.relations[ca.nationId] or 0) + amount * 0.7))
+        end
+    end
 end
 
 function Simulation:updateDiplomacy()
@@ -876,9 +1084,27 @@ function Simulation:updateDiplomacy()
                 local b = math.max(id, otherId)
                 local border = self.borderPairs[a .. ":" .. b] or 0
                 local pressure = d2 < 196 and -0.10 or 0.025
-                pressure = pressure - math.min(border, 36) * 0.006
+                pressure = pressure - math.min(border, 80) * 0.018
                 local prosperity = ((community.avgProsperity or 0) + (other.avgProsperity or 0)) > 120 and 0.025 or 0
                 community.relations[otherId] = math.max(-100, math.min(100, community.relations[otherId] + pressure + prosperity))
+                if border > 0 and community.nationId and other.nationId and community.nationId ~= other.nationId then
+                    local nation = self.nations[community.nationId]
+                    if nation then
+                        nation.relations[other.nationId] = math.max(-100, math.min(100, (nation.relations[other.nationId] or 0) - math.min(border, 80) * 0.008))
+                    end
+                end
+            end
+        end
+    end
+
+    for id, nation in pairs(self.nations) do
+        for otherId, other in pairs(self.nations) do
+            if id ~= otherId then
+                nation.relations[otherId] = nation.relations[otherId] or 0
+                local dominanceGap = (nation.dominance or 0) - (other.dominance or 0)
+                local pressure = dominanceGap > 35 and -0.018 or 0.012
+                local prosperity = ((nation.avgProsperity or 0) + (other.avgProsperity or 0)) > 126 and 0.018 or 0
+                nation.relations[otherId] = math.max(-100, math.min(100, nation.relations[otherId] + pressure + prosperity))
             end
         end
     end
@@ -895,6 +1121,32 @@ function Simulation:chooseWarTarget(community)
         end
     end
     return targetId, worst
+end
+
+function Simulation:chooseConflictTarget(community)
+    if not community then
+        return nil, 0
+    end
+    local bestId = nil
+    local bestScore = 0
+    for otherId, other in pairs(self.communities) do
+        if otherId ~= community.id then
+            local relation = community.relations[otherId] or 0
+            local border = self:borderConflict(community.id, otherId)
+            local sameNation = community.nationId and other.nationId and community.nationId == other.nationId
+            if not sameNation then
+                local score = math.max(0, -relation) + border * 1.15
+                if border > 0 and relation < 8 then
+                    score = score + 14
+                end
+                if score > bestScore then
+                    bestScore = score
+                    bestId = otherId
+                end
+            end
+        end
+    end
+    return bestId, bestScore
 end
 
 function Simulation:prepareExplorationProject(community)
@@ -952,84 +1204,400 @@ function Simulation:prepareExplorationProject(community)
     return { x = targetX, y = targetY, explorers = explorers, expeditionId = expeditionId, parentCommunityId = community.id }
 end
 
+function Simulation:startAgentExploration(agent)
+    local community = agent and agent.communityId and self.communities[agent.communityId]
+    if not community or not community.hasWarehouse or agent.expedition then
+        return false
+    end
+
+    local targetX, targetY
+    local bestScore = -math.huge
+    for _ = 1, 64 do
+        local x, y = self.world:findRandomWalkable()
+        local dx = x - community.x
+        local dy = y - community.y
+        local d2 = dx * dx + dy * dy
+        local claim = self.claims[self:claimKey(x, y)]
+        if d2 > 420 and (not claim or claim.communityId == community.id) then
+            local pressure = self.world:resourcePressureAround(x, y, 7)
+            local score = pressure.food + pressure.animals * 2 + pressure.wood * 0.25 + pressure.water * 12 + math.sqrt(d2) * 0.5
+            if score > bestScore then
+                bestScore = score
+                targetX, targetY = x, y
+            end
+        end
+    end
+
+    if not targetX then
+        targetX, targetY = self.world:findRandomWalkable()
+    end
+
+    agent.expedition = {
+        id = community.id .. ":" .. tostring(self.tick) .. ":" .. tostring(agent.id),
+        parentCommunityId = community.id,
+        targetX = targetX,
+        targetY = targetY,
+        expires = self.tick + PROJECT_DURATION * 3
+    }
+    self:leaveCommunity(agent)
+    agent.homeId = nil
+    agent.homeX = nil
+    agent.homeY = nil
+    return true
+end
+
 function Simulation:setCommunityProject(communityId, kind)
     local community = communityId and self.communities[communityId]
     if not community then
         return false
     end
 
-    local target = nil
-    if kind == "exploration" then
-        target = self:prepareExplorationProject(community)
-    elseif kind == "war" or kind == "armament" then
-        target = self:chooseWarTarget(community)
-        if not target then
-            for otherId in pairs(self.communities) do
-                if otherId ~= community.id then
-                    target = otherId
-                    break
-                end
-            end
-        end
-    end
-
     community.project = {
-        kind = kind,
-        targetCommunityId = type(target) == "number" and target or nil,
-        targetX = type(target) == "table" and target.x or nil,
-        targetY = type(target) == "table" and target.y or nil,
-        explorers = type(target) == "table" and target.explorers or nil,
-        expeditionId = type(target) == "table" and target.expeditionId or nil,
-        parentCommunityId = type(target) == "table" and target.parentCommunityId or nil,
-        timer = PROJECT_DURATION
+        kind = "micro",
+        targetCommunityId = nil,
+        timer = 0
     }
-    community.mood = kind
+    community.mood = "micro"
+    local nation = community.nationId and self.nations[community.nationId]
+    if nation then
+        nation.project = {
+            kind = "micro",
+            targetNationId = nil,
+            targetCommunityId = nil,
+            timer = 0
+        }
+        nation.assignments = {}
+    end
     return true
 end
 
 function Simulation:updateCommunityProjects(force)
+    Nation.recount(self)
+
+    for _, nation in pairs(self.nations) do
+        nation.project = nation.project or {}
+        nation.project.kind = (nation.members or 0) > 0 and "micro" or "none"
+        nation.project.targetNationId = nil
+        nation.project.targetCommunityId = nil
+        nation.project.timer = 0
+    end
+
     for _, community in pairs(self.communities) do
-        community.project.timer = (community.project.timer or 0) - PROJECT_CHECK_INTERVAL
-        if force or community.project.timer <= 0 then
-            local warTarget, relation = self:chooseWarTarget(community)
-            local kind = "stockpile"
-            local target = nil
+        local nation = community.nationId and self.nations[community.nationId]
+        community.project = {
+            kind = community.hasWarehouse and "micro" or "founding",
+            targetCommunityId = nil,
+            timer = 0,
+            nationId = nation and nation.id or nil,
+            targetNationId = nil
+        }
+        community.mood = community.project.kind
+    end
+end
 
-            local members = math.max(1, community.members or 0)
-            local storeFood = (community.store.food or 0) + (community.store.animals or 0) * 1.8
-            local storeMaterial = (community.store.wood or 0) + (community.store.stone or 0) + (community.store.iron or 0) * 1.5
-            local infrastructureReserve = ((community.farms or 0) * 12 + (community.paddocks or 0) * 14 + (community.houses or 0) * 2) / members
-            local reserve = storeFood / members + storeMaterial / members * 0.45
-            reserve = reserve + infrastructureReserve
-            local structureCount = (community.houses or 0) + (community.farms or 0) + (community.paddocks or 0) + (community.mines or 0) + (community.warehouses or 0) + (community.shrines or 0)
-            local housingShort = (community.houses or 0) * 2 < members + 4
-
-            if not community.hasWarehouse then
-                kind = "buildWarehouse"
-            elseif reserve < 14 or storeFood < members * 5 then
-                kind = "stockpile"
-            elseif warTarget and relation < -42 and reserve > 20 and (community.avgProsperity or 0) > 38 then
-                if (community.avgArmament or 0) < 0.38 and relation > -60 then
-                    kind = "armament"
-                    target = warTarget
-                else
-                    kind = "war"
-                    target = warTarget
+function Simulation:updateOvercrowdingMigration()
+    for _, community in pairs(self.communities) do
+        if not community.dead
+            and community.hasWarehouse
+            and (community.members or 0) >= 32
+            and self.tick >= (community.nextOvercrowdingMigrationTick or 0) then
+            local checked = 0
+            local crowdSum = 0
+            for _, agent in ipairs(self.agents) do
+                if agent.alive and agent.communityId == community.id then
+                    crowdSum = crowdSum + #self:nearAgents(agent.x, agent.y, 6, agent.id)
+                    checked = checked + 1
+                    if checked >= 18 then
+                        break
+                    end
                 end
-            elseif reserve > 30 and (community.avgProsperity or 0) > 62 and members >= 14 and structureCount >= 8 then
-                kind = "exploration"
-                target = self:prepareExplorationProject(community)
-            elseif (community.avgSpirituality or 100) < 48 and not community.hasShrine and community.members >= 8 then
-                kind = "buildShrine"
-            elseif reserve > 22 and (community.avgProsperity or 0) > 48 and housingShort then
-                kind = "housing"
-            elseif (community.avgProsperity or 0) > 66 then
-                kind = "develop"
-            else
-                kind = "stockpile"
             end
 
-            self:setCommunityProject(community.id, kind)
+            local avgCrowding = checked > 0 and crowdSum / checked or 0
+            local housingDeficit = math.max(0, (community.members or 0) - (community.houses or 0) * 2)
+            local store = community.store or {}
+            local storedFood = (store.food or 0) + (store.animals or 0) * 1.6
+            local materials = (store.wood or 0) + (store.stone or 0)
+            local stableEnough = (community.avgProsperity or 0) >= 34
+                and storedFood >= (community.members or 0) * 0.65
+                and materials >= 18
+
+            if stableEnough and (avgCrowding >= 22 or housingDeficit >= 10) then
+                self:prepareExplorationProject(community)
+                community.nextOvercrowdingMigrationTick = self.tick + 180
+            else
+                community.nextOvercrowdingMigrationTick = self.tick + 48
+            end
+        end
+    end
+end
+
+local function routeKey(a, b)
+    if a > b then
+        a, b = b, a
+    end
+    return tostring(a) .. ":" .. tostring(b)
+end
+
+local function storeCanPay(store, cost)
+    for resource, amount in pairs(cost or {}) do
+        if (store[resource] or 0) < amount then
+            return false
+        end
+    end
+    return true
+end
+
+local function spendStore(store, cost)
+    for resource, amount in pairs(cost or {}) do
+        store[resource] = (store[resource] or 0) - amount
+    end
+end
+
+function Simulation:updateDisease()
+    if not self.diseaseEnabled then
+        return
+    end
+
+    for _, community in pairs(self.communities) do
+        if not community.dead and (community.members or 0) > 0 then
+            local sample = 0
+            local crowd = 0
+            for _, agent in ipairs(self.agents) do
+                if agent.alive and agent.communityId == community.id then
+                    crowd = crowd + #self:nearAgents(agent.x, agent.y, 5, agent.id)
+                    sample = sample + 1
+                    if sample >= 20 then
+                        break
+                    end
+                end
+            end
+            local avgCrowd = sample > 0 and crowd / sample or 0
+            local infectedRatio = (community.infected or 0) / math.max(1, community.members or 1)
+            local housingDeficit = math.max(0, (community.members or 0) - (community.houses or 0) * 2)
+            community.diseasePressure = math.max(0, avgCrowd - 13) * 2.2
+                + infectedRatio * 42
+                + housingDeficit * 0.65
+                - (community.shrines or 0) * 1.2
+                - (community.ports or 0) * 0.5
+            community.diseasePressure = math.max(0, math.min(100, community.diseasePressure))
+        elseif community then
+            community.diseasePressure = 0
+        end
+    end
+end
+
+function Simulation:findPortSite(community)
+    if not community then
+        return nil
+    end
+    local best, bestD
+    for radius = 4, 18, 2 do
+        for yy = math.max(1, math.floor(community.y - radius)), math.min(self.world.height, math.ceil(community.y + radius)) do
+            for xx = math.max(1, math.floor(community.x - radius)), math.min(self.world.width, math.ceil(community.x + radius)) do
+                local tile = self.world:get(xx, yy)
+                if tile and not tile.building
+                    and (tile.type == Resources.TILE.grass or tile.type == Resources.TILE.forest or tile.type == Resources.TILE.sand or tile.type == Resources.TILE.path)
+                    and self.world:hasWaterNear(xx, yy) then
+                    local dx = xx - community.x
+                    local dy = yy - community.y
+                    local d = dx * dx + dy * dy
+                    if not bestD or d < bestD then
+                        best = { x = xx, y = yy }
+                        bestD = d
+                    end
+                end
+            end
+        end
+        if best then
+            return best
+        end
+    end
+    return nil
+end
+
+function Simulation:buildSettlementPort(community)
+    if not community or community.hasPort or not community.store then
+        return false
+    end
+    local cost = Building.cost("port")
+    if not storeCanPay(community.store, cost) then
+        return false
+    end
+    local site = self:findPortSite(community)
+    if not site then
+        return false
+    end
+    spendStore(community.store, cost)
+    local tile = self.world:get(site.x, site.y)
+    tile.type = Resources.TILE.port
+    tile.food, tile.wood, tile.stone, tile.iron, tile.animals = 0, 0, 0, 0, 0
+    tile.maxFood, tile.maxWood, tile.maxStone, tile.maxIron, tile.maxAnimals = 0, 0, 0, 0, 0
+    local building = {
+        id = #self.world.buildings + 1,
+        type = "port",
+        x = site.x,
+        y = site.y,
+        owner = nil,
+        communityId = community.id,
+        capacity = 0,
+        occupants = 0,
+        residents = {},
+        active = true,
+        abandonedTicks = 0,
+        width = 1,
+        height = 1,
+        maxHealth = 120,
+        health = 120
+    }
+    tile.building = building
+    self.world.buildings[#self.world.buildings + 1] = building
+    community.hasPort = true
+    community.ports = (community.ports or 0) + 1
+    self:rebuildBuildingLists()
+    self:onBuildingBuilt(building)
+    return true
+end
+
+function Simulation:buildLandRoute(a, b)
+    if not a or not b or not a.store then
+        return false
+    end
+    local dx = b.x - a.x
+    local dy = b.y - a.y
+    local steps = math.max(math.abs(dx), math.abs(dy))
+    if steps < 4 or steps > 80 then
+        return false
+    end
+    local cost = { wood = math.ceil(steps * 0.7), stone = math.ceil(steps * 0.3) }
+    if not storeCanPay(a.store, cost) then
+        return false
+    end
+    local points = {}
+    for i = 0, steps do
+        local x = math.floor(a.x + dx * (i / steps) + 0.5)
+        local y = math.floor(a.y + dy * (i / steps) + 0.5)
+        local tile = self.world:get(x, y)
+        if tile and not tile.building and (tile.type == Resources.TILE.grass or tile.type == Resources.TILE.forest or tile.type == Resources.TILE.sand or tile.type == Resources.TILE.snow or tile.type == Resources.TILE.path) then
+            points[#points + 1] = { x = x, y = y }
+        end
+    end
+    if #points < math.max(3, steps * 0.55) then
+        return false
+    end
+    spendStore(a.store, cost)
+    for _, p in ipairs(points) do
+        local tile = self.world:get(p.x, p.y)
+        if tile and not tile.building then
+            tile.type = Resources.TILE.path
+            tile.food = 0
+            tile.wood = 0
+            tile.animals = 0
+            tile.maxFood = 0
+            tile.maxWood = 0
+            tile.maxAnimals = 0
+        end
+    end
+    self.world:markIndexDirty()
+    return true
+end
+
+function Simulation:ensureTradeRoute(a, b)
+    if not a or not b or a.id == b.id then
+        return nil
+    end
+    local key = routeKey(a.id, b.id)
+    if self.tradeRoutes[key] then
+        return self.tradeRoutes[key]
+    end
+    local relation = (a.relations and a.relations[b.id]) or (b.relations and b.relations[a.id]) or 0
+    if a.nationId and b.nationId and a.nationId == b.nationId then
+        relation = relation + 35
+    end
+    if relation < 12 then
+        return nil
+    end
+
+    local dx = a.x - b.x
+    local dy = a.y - b.y
+    local distance = math.sqrt(dx * dx + dy * dy)
+    local kind = nil
+    if distance <= 70 and self:buildLandRoute(a, b) then
+        kind = "path"
+    elseif distance <= 140 then
+        if not a.hasPort then
+            self:buildSettlementPort(a)
+        end
+        if not b.hasPort then
+            self:buildSettlementPort(b)
+        end
+        if a.hasPort and b.hasPort then
+            kind = "port"
+        end
+    end
+    if not kind then
+        return nil
+    end
+    local route = { id = self.nextTradeRouteId, a = a.id, b = b.id, kind = kind, createdTick = self.tick }
+    self.nextTradeRouteId = self.nextTradeRouteId + 1
+    self.tradeRoutes[key] = route
+    return route
+end
+
+function Simulation:tradeBetween(a, b, route)
+    local relation = (a.relations and a.relations[b.id]) or (b.relations and b.relations[a.id]) or 0
+    local trust = math.max(0, relation + ((a.nationId and b.nationId and a.nationId == b.nationId) and 45 or 0))
+    if trust <= 0 then
+        return
+    end
+    local capacity = route.kind == "port" and 14 or 8
+    capacity = capacity * math.min(2.0, 0.65 + trust / 80)
+    local resources = { "food", "wood", "stone", "iron", "animals" }
+    for _, resource in ipairs(resources) do
+        local sa = a.store and (a.store[resource] or 0) or 0
+        local sb = b.store and (b.store[resource] or 0) or 0
+        local needA = (resource == "food" and (a.members or 0) * 2.2 or (a.members or 0) * 0.35)
+        local needB = (resource == "food" and (b.members or 0) * 2.2 or (b.members or 0) * 0.35)
+        if sa > needA and sb < needB then
+            local moved = math.min(capacity, sa - needA, needB - sb)
+            a.store[resource] = sa - moved
+            b.store[resource] = sb + moved
+        elseif sb > needB and sa < needA then
+            local moved = math.min(capacity, sb - needB, needA - sa)
+            b.store[resource] = sb - moved
+            a.store[resource] = sa + moved
+        end
+    end
+end
+
+function Simulation:updateTradeEconomy()
+    if not self.economyEnabled then
+        return
+    end
+    local list = {}
+    for _, community in pairs(self.communities) do
+        if not community.dead and community.hasWarehouse and (community.members or 0) > 0 then
+            list[#list + 1] = community
+        end
+    end
+    table.sort(list, function(a, b) return (a.members or 0) > (b.members or 0) end)
+    local checked = 0
+    for i = 1, #list do
+        for j = i + 1, #list do
+            local a, b = list[i], list[j]
+            local dx = a.x - b.x
+            local dy = a.y - b.y
+            local d2 = dx * dx + dy * dy
+            if d2 <= 19600 then
+                local route = self:ensureTradeRoute(a, b)
+                if route then
+                    self:tradeBetween(a, b, route)
+                end
+                checked = checked + 1
+                if checked >= 18 then
+                    return
+                end
+            end
         end
     end
 end
@@ -1121,8 +1689,17 @@ function Simulation:step()
     if self.tick % 30 == 0 then
         self:updateDiplomacy()
     end
+    if self.tick % 18 == 0 then
+        self:updateDisease()
+    end
+    if self.tick % 60 == 15 then
+        self:updateTradeEconomy()
+    end
     if self.tick % PROJECT_CHECK_INTERVAL == 1 then
         self:updateCommunityProjects(false)
+    end
+    if self.tick % 24 == 5 then
+        self:updateOvercrowdingMigration()
     end
     self.stats.actions = {}
 
@@ -1173,8 +1750,10 @@ function Simulation:draw()
     for _, agent in ipairs(self.agents) do
         local community = agent.communityId and self.communities[agent.communityId]
         agent.currentDrawCommunityColor = community and community.color or nil
+        agent.currentDrawSelected = agent.id == self.selectedAgentId
         agent:draw()
         agent.currentDrawCommunityColor = nil
+        agent.currentDrawSelected = nil
     end
     love.graphics.pop()
 end

@@ -16,6 +16,9 @@ local function newSimulation()
         initialAgents = config.simulation.initialAgents,
         populationCap = config.simulation.populationCap,
         tickStep = config.simulation.tickStep,
+        agentProductivity = config.simulation.agentProductivity,
+        diseaseEnabled = config.simulation.diseaseEnabled,
+        economyEnabled = config.simulation.economyEnabled,
         seed = config.map.seed or (os.time() % 100000),
         world = {
             continents = config.map.continents,
@@ -31,7 +34,7 @@ end
 
 function love.load()
     love.window.setTitle("Emergent World Simulation")
-    love.window.setMode(1280, 800, { resizable = true, minwidth = 1280, minheight = 720 })
+    love.window.setMode(1180, 760, { resizable = true, minwidth = 860, minheight = 560 })
     love.graphics.setDefaultFilter("nearest", "nearest")
     Sprites.load()
     config = Config.load("simulation_config.json")
@@ -65,7 +68,7 @@ function love.keypressed(key)
         sim = newSimulation()
         ui = UI.new(sim)
     elseif key == "tab" then
-        ui.showDetails = not ui.showDetails
+        ui:nextTab()
     elseif key == "home" then
         sim:centerCamera()
     end
@@ -90,4 +93,10 @@ end
 
 function love.mousemoved(x, y, dx, dy)
     sim:mousemoved(x, y, dx, dy)
+end
+
+function love.resize()
+    if sim then
+        sim:clampCamera()
+    end
 end

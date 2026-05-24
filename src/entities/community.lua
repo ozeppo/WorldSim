@@ -1,8 +1,14 @@
 local Community = {}
 
 local names = {
-    "Ash", "Brook", "Cedar", "Dawn", "Ember", "Field", "Grove", "Hill",
-    "Iris", "Juniper", "Kiln", "Lake", "Moss", "North", "Oak", "Pine"
+    "Aldermoor", "Brighthollow", "Stoneford", "Ravenhill",
+    "Ironvale", "Eastmere", "Oakrest", "Greywatch",
+    "Emberfall", "Westreach", "Thornfield", "Riverstead",
+    "Mistgrove", "Redbrook", "Highmere", "Wolfden",
+    "Goldhaven", "Ashenford", "Deepwood", "Kingsrest",
+    "Blackwater", "Silverhollow", "Frostmere", "Greenstead",
+    "Dunrock", "Sunspire", "Lowhaven", "Stormford",
+    "Whiteridge", "Moonbrook", "Eaglewatch", "Northpass"
 }
 
 local function colorFor(id)
@@ -13,12 +19,13 @@ local function colorFor(id)
     return { math.max(0.15, r), math.max(0.15, g), math.max(0.15, b) }
 end
 
-function Community.create(sim, x, y, founder)
+function Community.create(sim, x, y, founder, nationId)
     local id = sim.nextCommunityId
     sim.nextCommunityId = sim.nextCommunityId + 1
 
     sim.communities[id] = {
         id = id,
+        nationId = nationId,
         name = names[((id - 1) % #names) + 1] .. " " .. id,
         x = x,
         y = y,
@@ -29,8 +36,12 @@ function Community.create(sim, x, y, founder)
         mines = 0,
         warehouses = 0,
         shrines = 0,
+        ports = 0,
         hasWarehouse = false,
         hasShrine = false,
+        hasPort = false,
+        diseasePressure = 0,
+        infected = 0,
         store = { food = 0, wood = 0, stone = 0, iron = 0, animals = 0 },
         housed = 0,
         prosperous = 0,
@@ -43,8 +54,9 @@ function Community.create(sim, x, y, founder)
         cohesion = 55,
         relations = {},
         claims = {},
-        project = { kind = "buildWarehouse", timer = 80, targetCommunityId = nil },
-        mood = "buildWarehouse",
+        claimCount = 0,
+        project = { kind = "micro", timer = 0, targetCommunityId = nil },
+        mood = "micro",
         color = colorFor(id),
         founder = founder and founder.id or nil
     }
@@ -89,8 +101,11 @@ function Community.recount(sim)
         community.mines = 0
         community.warehouses = 0
         community.shrines = 0
+        community.ports = 0
         community.hasWarehouse = false
         community.hasShrine = false
+        community.hasPort = false
+        community.infected = 0
         community.housed = 0
         community.prosperous = 0
         community.avgProsperity = 0
@@ -121,6 +136,9 @@ function Community.recount(sim)
             if agent.armor then
                 community.armored = community.armored + 1
             end
+            if (agent.disease or 0) > 0 then
+                community.infected = community.infected + 1
+            end
             community.avgProsperity = community.avgProsperity + (agent.prosperity or agent.personalProsperity or 0)
             community.avgSpirituality = community.avgSpirituality + (agent.spirituality or 100)
         end
@@ -143,6 +161,9 @@ function Community.recount(sim)
             elseif building.type == "shrine" then
                 community.shrines = community.shrines + 1
                 community.hasShrine = true
+            elseif building.type == "port" then
+                community.ports = community.ports + 1
+                community.hasPort = true
             end
         end
     end
@@ -155,8 +176,8 @@ function Community.recount(sim)
             community.avgSpirituality = community.avgSpirituality / community.members
             community.prosperityBonus = 30 * (community.prosperous / community.members)
             community.avgArmament = (community.armed + community.armored * 0.8) / (community.members * 1.8)
-            community.cohesion = math.max(20, math.min(100, 45 + community.houses * 4 + community.farms * 2 + community.paddocks * 2.4 + community.mines * 1.4 + community.warehouses * 10 + community.shrines * 8 + community.prosperityBonus * 0.4 + community.avgSpirituality * 0.08 - math.max(0, community.members - community.houses * 2) * 0.9))
-        elseif community.houses == 0 and community.farms == 0 and community.paddocks == 0 and community.mines == 0 and community.warehouses == 0 and community.shrines == 0 then
+            community.cohesion = math.max(20, math.min(100, 45 + community.houses * 4 + community.farms * 2 + community.paddocks * 2.4 + community.mines * 1.4 + community.warehouses * 10 + community.shrines * 8 + community.ports * 5 + community.prosperityBonus * 0.4 + community.avgSpirituality * 0.08 - math.max(0, community.members - community.houses * 2) * 0.9))
+        elseif community.houses == 0 and community.farms == 0 and community.paddocks == 0 and community.mines == 0 and community.warehouses == 0 and community.shrines == 0 and (community.ports or 0) == 0 then
             sim.communities[id] = nil
         end
     end

@@ -1,25 +1,28 @@
 {
-  "version": "1.0.0",
+  "version": "1.2.0",
   "map": {
     "width": 200,
-    "height": 128,
+    "height": 200,
     "continents": 4,
     "continentScale": 1.0,
     "archipelagos": 8,
     "shallowWaterDepth": 3,
     "rivers": 12,
-    "lakes": 24,
+    "lakes": 14,
     "seed": null
   },
   "simulation": {
-    "initialAgents": 150,
-    "populationCap": 1500,
-    "tickStep": 0.18
+    "initialAgents": 100,
+    "populationCap": 600,
+    "tickStep": 0.18,
+    "agentProductivity": 2.0,
+    "diseaseEnabled": true,
+    "economyEnabled": true
   },
   "resources": {
     "forest": 1.0,
     "rock": 0.75,
     "iron": 0.65,
-    "animals": 0.55
+    "animals": 0.30
   }
 }

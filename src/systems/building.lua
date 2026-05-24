@@ -3,12 +3,13 @@ local Resources = require("src.systems.resources")
 local Building = {}
 
 local COSTS = {
-    house = { wood = 22, stone = 6 },
-    farm = { wood = 10, stone = 3 },
-    paddock = { wood = 16, stone = 4, animals = 1 },
+    house = { wood = 16, stone = 4 },
+    farm = { wood = 8, stone = 2 },
+    paddock = { wood = 12, stone = 3, animals = 1 },
     mine = { wood = 22, stone = 0 },
     warehouse = { wood = 24, stone = 10 },
-    shrine = { wood = 34, stone = 36 }
+    shrine = { wood = 34, stone = 36 },
+    port = { wood = 34, stone = 12 }
 }
 
 local HEALTH = {
@@ -17,7 +18,8 @@ local HEALTH = {
     paddock = 58,
     mine = 70,
     warehouse = 160,
-    shrine = 140
+    shrine = 140,
+    port = 120
 }
 
 function Building.cost(kind)
@@ -75,11 +77,26 @@ local function fitsBuilding(world, x, y, kind, communityId)
                     return false
                 end
             elseif kind == "farm" then
-                if not tile or tile.type ~= Resources.TILE.grass or not world:hasWaterNear(xx, yy) then
+                if not tile or tile.type ~= Resources.TILE.grass then
                     return false
                 end
+            elseif kind == "port" then
+                if not tile or (tile.type ~= Resources.TILE.grass and tile.type ~= Resources.TILE.forest and tile.type ~= Resources.TILE.sand and tile.type ~= Resources.TILE.path) or not world:hasWaterNear(xx, yy) then
+                    return false
+                end
+            elseif kind == "house" then
+                if not tile or (tile.type ~= Resources.TILE.grass and tile.type ~= Resources.TILE.forest and tile.type ~= Resources.TILE.path) then
+                    return false
+                end
+                for ny = math.max(1, yy - 1), math.min(world.height, yy + 1) do
+                    for nx = math.max(1, xx - 1), math.min(world.width, xx + 1) do
+                        if world.tiles[ny][nx].type == Resources.TILE.house then
+                            return false
+                        end
+                    end
+                end
             else
-                if not tile or (tile.type ~= Resources.TILE.grass and tile.type ~= Resources.TILE.forest) then
+                if not tile or (tile.type ~= Resources.TILE.grass and tile.type ~= Resources.TILE.forest and tile.type ~= Resources.TILE.path) then
                     return false
                 end
             end
@@ -134,8 +151,18 @@ function Building.build(world, agent, kind, x, y, contributors)
     if not tile
         or (kind == "mine" and tile.type ~= Resources.TILE.rock)
         or (kind == "farm" and tile.type ~= Resources.TILE.grass)
-        or (kind ~= "mine" and kind ~= "farm" and tile.type ~= Resources.TILE.grass and tile.type ~= Resources.TILE.forest) then
+        or (kind == "port" and ((tile.type ~= Resources.TILE.grass and tile.type ~= Resources.TILE.forest and tile.type ~= Resources.TILE.sand and tile.type ~= Resources.TILE.path) or not world:hasWaterNear(x, y)))
+        or (kind ~= "mine" and kind ~= "farm" and kind ~= "port" and tile.type ~= Resources.TILE.grass and tile.type ~= Resources.TILE.forest and tile.type ~= Resources.TILE.path) then
         return false
+    end
+    if kind == "house" then
+        for yy = math.max(1, y - 1), math.min(world.height, y + 1) do
+            for xx = math.max(1, x - 1), math.min(world.width, x + 1) do
+                if world.tiles[yy][xx].type == Resources.TILE.house then
+                    return false
+                end
+            end
+        end
     end
 
     local cost = COSTS[kind]
@@ -198,6 +225,18 @@ function Building.build(world, agent, kind, x, y, contributors)
         tile.maxIron = mineResource == "iron" and 4 or 0
         tile.mineResource = mineResource
         tile.mineReserve = math.max(18, capacity * (mineResource == "iron" and 4 or 5))
+    elseif kind == "port" then
+        tile.type = Resources.TILE.port
+        tile.food = 0
+        tile.wood = 0
+        tile.stone = 0
+        tile.iron = 0
+        tile.animals = 0
+        tile.maxFood = 0
+        tile.maxWood = 0
+        tile.maxStone = 0
+        tile.maxIron = 0
+        tile.maxAnimals = 0
     elseif kind == "warehouse" or kind == "shrine" then
         for yy = y, y + 1 do
             for xx = x, x + 1 do
@@ -253,6 +292,9 @@ function Building.build(world, agent, kind, x, y, contributors)
     elseif kind == "shrine" and community then
         community.hasShrine = true
         community.shrines = (community.shrines or 0) + 1
+    elseif kind == "port" and community then
+        community.ports = (community.ports or 0) + 1
+        community.hasPort = true
     end
     return true, building
 end

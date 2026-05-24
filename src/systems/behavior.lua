@@ -192,6 +192,14 @@ local function nearestEnemyBuilding(agent, sim, communityId)
                 local dy = building.y - agent.y
                 local d = dx * dx + dy * dy
                 local value = building.type == "warehouse" and -20 or (building.type == "farm" and -8 or 0)
+                local border = agent.communityId and sim.borderConflict and sim:borderConflict(agent.communityId, building.communityId) or 0
+                if border > 0 then
+                    value = value - math.min(30, border * 0.55)
+                end
+                local relation = agent.communityId and sim.relation and sim:relation(agent.communityId, building.communityId) or 0
+                if relation < -20 then
+                    value = value + relation * 0.18
+                end
                 if d + value < bestD then
                     best = building
                     bestD = d + value
@@ -253,6 +261,29 @@ function Behavior.choose(agent, sim)
     end
 
     local communitySupport = sameCommunity * 1.8 + familyNear * 2.6 + trustedNear * 0.8
+    local joinTarget, joinScore = communityOpportunity(agent, sim, nearby)
+    local joinHouse = (not agent.communityId) and sim:nearestHouse(agent.x, agent.y, nil, false) or nil
+    local joinHouseD2 = math.huge
+    if joinHouse then
+        local dx = joinHouse.x - agent.x
+        local dy = joinHouse.y - agent.y
+        joinHouseD2 = dx * dx + dy * dy
+        if joinHouseD2 > 576 then
+            joinHouse = nil
+            joinHouseD2 = math.huge
+        end
+    end
+    local needState = agent.needState and agent:needState(sim.tick) or {
+        food = agent.hunger / 100,
+        water = agent.thirst / 100,
+        rest = (100 - agent.energy) / 100,
+        social = agent.socialNeed / 100,
+        reproduce = agent.fertility / 100,
+        purpose = 0,
+        tier1 = math.max(agent.hunger, agent.thirst) / 100,
+        tier2 = math.max(100 - agent.energy, agent.socialNeed) / 100,
+        tier3 = 0
+    }
 
     local scores = {}
     local targets = {}
@@ -261,6 +292,7 @@ function Behavior.choose(agent, sim)
     targets.searchWater = scores.searchWater > 45 and nearestResource(sim, agent, "water") or nil
 
     local community = agent.communityId and sim.communities[agent.communityId]
+    local usesCivicAI = community and community.hasWarehouse
     local warehouse = community and sim:nearestBuilding(agent.x, agent.y, "warehouse", agent.communityId) or nil
     local members = math.max(1, community and (community.members or 1) or 1)
     local localFoodValue = localResources.food + localResources.animals * 1.7
@@ -274,16 +306,15 @@ function Behavior.choose(agent, sim)
 
     scores.rest = agent.homeId and ((100 - agent.energy) * 1.05 + agent.stress * 0.42 + world:comfortAt(agent.x, agent.y) * 0.22) or -1
 
-    local project = community and community.project or nil
+    local project = nil
     local expedition = agent.expedition
     if expedition and expedition.expires and expedition.expires < sim.tick then
         agent.expedition = nil
         expedition = nil
     end
-    local isExplorer = (project and project.kind == "exploration" and project.explorers and project.explorers[agent.id])
-        or (expedition and expedition.parentCommunityId and sim.communities[expedition.parentCommunityId])
-    local exploreTargetX = (expedition and expedition.targetX) or (project and project.targetX)
-    local exploreTargetY = (expedition and expedition.targetY) or (project and project.targetY)
+    local isExplorer = expedition and expedition.parentCommunityId and sim.communities[expedition.parentCommunityId]
+    local exploreTargetX = expedition and expedition.targetX or nil
+    local exploreTargetY = expedition and expedition.targetY or nil
     local foundingColony = expedition and expedition.parentCommunityId and exploreTargetX and exploreTargetY
         and math.abs(agent.x - exploreTargetX) + math.abs(agent.y - exploreTargetY) <= 10
     if isExplorer and exploreTargetX and exploreTargetY then
@@ -291,8 +322,9 @@ function Behavior.choose(agent, sim)
     end
     local hasSettlementCore = community and community.hasWarehouse and not foundingColony
     local needsSettlementCore = not hasSettlementCore
+    local shouldJoinExisting = not community and not foundingColony and ((joinTarget and joinScore > -24) or (joinHouse and joinHouseD2 <= 144))
     local wantsSettlement = needsSettlementCore or community.houses < math.ceil((community.members or 1) / 2) or community.farms + (community.paddocks or 0) < math.ceil((community.members or 1) / 7)
-    local wantsGear = project and (project.kind == "armament" or project.kind == "war") and (not agent.sword or not agent.armor)
+    local wantsGear = false
     local gatherResource = agent.inventory.wood < 52 and "wood" or "stone"
     local animalReserve = agent:availableResource("animals")
     local needsHerd = community and ((community.paddocks or 0) < math.ceil((community.members or 1) / 10) or ((community.store.animals or 0) < (community.members or 1) * 1.5))
@@ -303,7 +335,7 @@ function Behavior.choose(agent, sim)
         gatherResource = warehouseMissingStone > 0 and "stone" or "wood"
     elseif wantsGear and (agent:availableResource("iron") < 16 or (agent.inventory.iron or 0) < 8) then
         gatherResource = "iron"
-    elseif community and needsHerd and animalReserve < 6 and (community.project.kind == "stockpile" or community.project.kind == "housing" or community.project.kind == "exploration") then
+    elseif community and needsHerd and animalReserve < 6 then
         gatherResource = "animals"
     end
     scores.gather = 24 + math.max(0, 52 - agent.inventory.wood) * 0.48 + math.max(0, 34 - agent.inventory.stone) * 0.55 + math.max(0, 14 - (agent.inventory.iron or 0)) * (wantsGear and 1.4 or 0.25) + math.max(0, 6 - animalReserve) * (needsHerd and 2.4 or 0.35) + (wantsSettlement and 14 or 0) + (needsSettlementCore and (warehouseMissingWood * 0.9 + warehouseMissingStone * 1.35 + 42) or 0)
@@ -319,8 +351,10 @@ function Behavior.choose(agent, sim)
     local foreignPressure = foreignSettlementPressure(agent, sim, sx, sy)
     local shrine = agent.communityId and sim:nearestBuilding(agent.x, agent.y, "shrine", agent.communityId) or nil
     local housingNeed = community and math.max(0, community.members - community.houses * 2) or (agent.homeId and 0 or 2)
-    local farmNeed = community and math.max(0, community.members - math.floor(localFoodValue / 11) - community.farms * 7) or (poorForaging and 6 or 0)
-    local paddockNeed = community and math.max(0, community.members - (community.paddocks or 0) * 8) or 5
+    local minimumFarms = community and ((community.members or 0) >= 10 and math.ceil((community.members or 0) / 14) or 0) or 0
+    local minimumPaddocks = community and ((community.members or 0) >= 14 and math.ceil((community.members or 0) / 18) or 0) or 0
+    local farmNeed = community and math.max(0, community.members - math.floor(localFoodValue / 11) - community.farms * 7, minimumFarms - community.farms) or (poorForaging and 6 or 0)
+    local paddockNeed = community and math.max(0, community.members - (community.paddocks or 0) * 8, minimumPaddocks - (community.paddocks or 0)) or 5
     local miningNeed = math.max(0, 24 - agent:availableResource("stone")) + math.max(0, 10 - agent:availableResource("iron")) * (wantsGear and 2.2 or 0.8)
 
     local mineLimit = community and (math.ceil(members / 10) + (wantsGear and 3 or 1)) or 0
@@ -328,7 +362,9 @@ function Behavior.choose(agent, sim)
     local canBuildFarm = hasSettlementCore and (farmNeed > 0 or scarcity > 4 or poorForaging) and Building.canAfford(agent, "farm", nearby)
     local canBuildPaddock = hasSettlementCore and (paddockNeed > 0 or scarcity > 3) and Building.canAfford(agent, "paddock", nearby)
     local canBuildMine = hasSettlementCore and ((community.mines or 0) < mineLimit) and (miningNeed > 0 or wantsGear) and Building.canAfford(agent, "mine", nearby)
-    local canBuildWarehouse = (((community and not community.hasWarehouse) or not community) or foundingColony) and Building.canAfford(agent, "warehouse", nearby)
+    local canBuildWarehouse = (((community and not community.hasWarehouse) or not community) or foundingColony)
+        and not shouldJoinExisting
+        and Building.canAfford(agent, "warehouse", nearby)
     local canBuildShrine = community and not community.hasShrine and Building.canAfford(agent, "shrine", nearby)
 
     local comfortDeficit = homeless and 42 or math.max(0, 18 - world:comfortAt(agent.x, agent.y)) * 0.4
@@ -373,7 +409,11 @@ function Behavior.choose(agent, sim)
     end
 
     if warehouse and inventoryLoad > 0 then
-        setWarehouseNeed(42 + inventoryLoad * 1.15, nil, false)
+        local materialLoad = (agent.inventory.wood or 0)
+            + (agent.inventory.stone or 0)
+            + (agent.inventory.iron or 0)
+            + (agent.inventory.animals or 0)
+        setWarehouseNeed(72 + inventoryLoad * 3.2 + materialLoad * 4.8, nil, false)
     end
     if warehouse and agent.hunger > 52 and agent.inventory.food <= 0 and (community.store.food or 0) > math.max(2, members * 0.5) then
         setWarehouseNeed(70 + agent.hunger * 0.55, { food = 1 }, true)
@@ -416,13 +456,13 @@ function Behavior.choose(agent, sim)
 
         local farmCost = Building.cost("farm")
         local farmMissing, farmTotal = missingFromInventory(farmCost)
-        if poorForaging and farmTotal > 0 and storeCovers(farmMissing) then
+        if (farmNeed > 0 or poorForaging) and farmTotal > 0 and storeCovers(farmMissing) then
             setWarehouseNeed(86 + farmTotal * 1.8, farmCost, false)
         end
 
         local paddockCost = Building.cost("paddock")
         local paddockMissing, paddockTotal = missingFromInventory(paddockCost)
-        if needsHerd and paddockTotal > 0 and storeCovers(paddockMissing) then
+        if (paddockNeed > 0 or needsHerd) and paddockTotal > 0 and storeCovers(paddockMissing) then
             setWarehouseNeed(92 + paddockTotal * 2.1, paddockCost, false)
         end
 
@@ -462,8 +502,7 @@ function Behavior.choose(agent, sim)
     scores.socialize = socialTarget and (agent.socialNeed * 0.72 + math.max(0, socialTrust(agent, socialTarget)) * 0.28 + communitySupport * 1.3 - agent.stress * 0.1) or -1
     targets.socialize = socialTarget
 
-    local joinTarget, joinScore = communityOpportunity(agent, sim, nearby)
-    scores.formCommunity = (not agent.communityId and joinTarget) and (42 + math.max(0, joinScore) * 0.35 + trustedNear * 8 + #nearby * 2) or -1
+    scores.formCommunity = (not agent.communityId and (joinTarget or joinHouse)) and (78 + math.max(0, joinScore) * 0.45 + trustedNear * 9 + #nearby * 2) or -1
     targets.formCommunity = joinTarget
 
     local mate = nil
@@ -477,7 +516,7 @@ function Behavior.choose(agent, sim)
     end
     local home = sim:getBuilding(agent.homeId)
     local partnerHome = mate and sim:getBuilding(mate.homeId)
-    local hasFamilySpace = (home and (home.occupants or 0) < (home.capacity or 2)) or (partnerHome and (partnerHome.occupants or 0) < (partnerHome.capacity or 2)) or (community and community.houses * 2 > community.members)
+    local hasFamilyHome = home or partnerHome
     local selfStable = agent.hunger < 42 and agent.thirst < 42 and agent.energy > 45 and agent.stress < 62
     local partnerStable = mate and mate.hunger < 45 and mate.thirst < 45 and mate.energy > 38 and mate.stress < 66
     local fertile = agent.age > 18 and agent.homeId and agent.fertility > 38 and agent.hunger < 58 and agent.thirst < 58 and agent.stress < 72 and agent.energy > 32
@@ -485,33 +524,47 @@ function Behavior.choose(agent, sim)
     local settlementResources = cachedResourcePressure(sim, rx, ry, 9)
     local storedFood = community and ((community.store.food or 0) + (community.store.animals or 0) * 1.8) or 0
     local reproductionFood = settlementResources.food + settlementResources.animals * 1.6 + storedFood
-    local resourcesReady = reproductionFood > 58 and settlementResources.water > 0
+    local resourcesReady = reproductionFood > 42 and settlementResources.water > 0
     local fertilityReadiness = math.min(agent.fertility or 0, mate and mate.fertility or 0)
     local stabilityBonus = (selfStable and 30 or 0) + (partnerStable and 22 or 0)
-    local foodReserveBonus = clamp((reproductionFood - 58) / 4, 0, 22)
-    scores.reproduce = fertile and partnerReady and hasFamilySpace and resourcesReady and (fertilityReadiness * 0.82 + mateTrust * 0.42 + localResources.food * 0.05 + localResources.animals * 0.10 + communitySupport * 0.9 + prosperity * 0.30 + stabilityBonus + foodReserveBonus) or -1
+    local foodReserveBonus = clamp((reproductionFood - 42) / 4, 0, 22)
+    scores.reproduce = fertile and partnerReady and hasFamilyHome and resourcesReady and (fertilityReadiness * 0.82 + mateTrust * 0.42 + localResources.food * 0.05 + localResources.animals * 0.10 + communitySupport * 0.9 + prosperity * 0.30 + stabilityBonus + foodReserveBonus) or -1
     targets.reproduce = mate
 
     local housingShortage = community and community.members > community.houses * 2 + community.farms * 3 + (community.paddocks or 0) * 2
     local migrationReady = (agent.migrationCooldown or 0) <= 0
-    local migrationStress = agent.communityId and migrationReady and ((agent.stress > 72 or agent.aggression > 62) or (overcrowding > 9 and scarcity > 5 and housingShortage))
-    scores.migrateCommunity = migrationStress and (joinTarget or scarcity > 6 or overcrowding > 9) and (46 + agent.stress * 0.28 + agent.aggression * 0.35 + math.max(0, joinScore) * 0.18) or -1
+    local cityCrowding = community and community.hasWarehouse and community.members >= 18 and overcrowding > 12
+    local migrationStress = agent.communityId and migrationReady and ((agent.stress > 72 or agent.aggression > 62) or (overcrowding > 9 and scarcity > 5 and housingShortage) or cityCrowding)
+    scores.migrateCommunity = migrationStress and (joinTarget or scarcity > 6 or overcrowding > 9 or cityCrowding) and (46 + agent.stress * 0.28 + agent.aggression * 0.35 + math.max(0, joinScore) * 0.18 + (cityCrowding and (overcrowding * 4.2 + prosperity * 0.35) or 0)) or -1
     targets.migrateCommunity = joinTarget
 
     local attackTarget, attackScore = chooseAttackTarget(agent, nearby)
-    if project and project.kind == "war" and project.targetCommunityId and prosperity > 30 then
-        attackTarget = nearestAgentOfCommunity(agent, sim, project.targetCommunityId) or attackTarget
+    local conflictTargetId = nil
+    local conflictScore = 0
+    if community and sim.chooseConflictTarget then
+        local targetId, score = sim:chooseConflictTarget(community)
+        if score > conflictScore then
+            conflictTargetId = targetId or conflictTargetId
+            conflictScore = score
+        end
+    end
+    local projectWar = false
+    local borderWar = conflictTargetId and conflictScore > 26 and prosperity > 30
+    local armamentPressure = conflictTargetId and conflictScore > 14 and prosperity > 30
+    if (projectWar or borderWar) and conflictTargetId and prosperity > 30 then
+        attackTarget = nearestAgentOfCommunity(agent, sim, conflictTargetId) or attackTarget
         attackScore = (attackScore or 0) + 80
     end
-    local enemyBuilding = project and (project.kind == "war" or project.kind == "armament") and nearestEnemyBuilding(agent, sim, project.targetCommunityId) or nil
-    scores.craftGear = ((not agent.sword and agent:canCraftSword()) or (not agent.armor and agent:canCraftArmor())) and (42 + (project and (project.kind == "war" or project.kind == "armament") and 46 or 0)) or -1
+    wantsGear = armamentPressure and (not agent.sword or not agent.armor)
+    local enemyBuilding = (armamentPressure or borderWar) and nearestEnemyBuilding(agent, sim, conflictTargetId) or nil
+    scores.craftGear = ((not agent.sword and agent:canCraftSword()) or (not agent.armor and agent:canCraftArmor())) and (42 + ((armamentPressure or borderWar) and 46 or 0) + math.min(28, conflictScore * 0.35)) or -1
     targets.craftGear = agent
     local desperate = agent.aggression > 98 and (agent.hunger > 94 or agent.thirst > 95 or scarcity > 12)
     local canStillMove = scores.migrateCommunity > 0 or scores.formCommunity > 0
-    local warDriven = project and project.kind == "war" and prosperity > 30 and attackTarget
+    local warDriven = borderWar and prosperity > 30 and attackTarget
     scores.attack = ((desperate and attackTarget and not canStillMove and not hasBetterSurvivalOption(sim, agent)) or warDriven) and (agent.aggression + attackScore * 0.25 + (warDriven and 70 or 0)) or -1
     targets.attack = attackTarget
-    scores.attackBuilding = (project and project.kind == "war" and prosperity > 30 and enemyBuilding) and (70 + agent.aggression * 0.25 + (agent.sword and 24 or -10)) or -1
+    scores.attackBuilding = (borderWar and prosperity > 30 and enemyBuilding) and (70 + agent.aggression * 0.25 + (agent.sword and 24 or -10) + math.min(42, conflictScore * 0.65)) or -1
     targets.attackBuilding = enemyBuilding
     scores.explore = isExplorer and exploreTargetX and exploreTargetY and not foundingColony and (70 + prosperity * 0.25) or -1
     targets.explore = isExplorer and exploreTargetX and exploreTargetY and { x = exploreTargetX, y = exploreTargetY } or nil
@@ -567,9 +620,28 @@ function Behavior.choose(agent, sim)
         scores.reproduce = scores.reproduce > 0 and scores.reproduce + 18 or scores.reproduce
     end
 
+    if agent.homeId and agent.energy < 44 then
+        local fatigue = clamp((44 - agent.energy) / 44, 0, 1)
+        scores.rest = scores.rest > 0 and scores.rest + 62 + fatigue * 138 + agent.stress * 0.75 or scores.rest
+        if agent.energy < 24 then
+            scores.gather = scores.gather * 0.45
+            scores.socialize = scores.socialize > 0 and scores.socialize * 0.55 or scores.socialize
+            scores.buildHouse = scores.buildHouse > 0 and scores.buildHouse * 0.55 or scores.buildHouse
+            scores.buildFarm = scores.buildFarm > 0 and scores.buildFarm * 0.55 or scores.buildFarm
+            scores.buildPaddock = scores.buildPaddock > 0 and scores.buildPaddock * 0.55 or scores.buildPaddock
+            scores.buildMine = scores.buildMine > 0 and scores.buildMine * 0.55 or scores.buildMine
+            scores.buildWarehouse = scores.buildWarehouse > 0 and scores.buildWarehouse * 0.55 or scores.buildWarehouse
+            scores.buildShrine = scores.buildShrine > 0 and scores.buildShrine * 0.55 or scores.buildShrine
+            scores.reproduce = scores.reproduce > 0 and scores.reproduce * 0.35 or scores.reproduce
+            scores.attack = -1
+            scores.attackBuilding = -1
+        end
+    end
+
     local projectDrive = 0
-    if prosperity > 30 and project then
-        local personalDrive = 0.28 + (math.sin((agent.aiSeed or agent.id or 1) * 0.017) * 0.5 + 0.5) * 0.38
+    if prosperity > 30 and usesCivicAI then
+        local personalDrive = 0.22 + (math.sin((agent.aiSeed or agent.id or 1) * 0.017) * 0.5 + 0.5) * 0.28
+        personalDrive = personalDrive + needState.purpose * 0.24 + math.max(0, 55 - (agent.purpose or 45)) * 0.004
         local welfareDrive = clamp((prosperity - 28) / 55, 0, 1)
         local pressurePenalty = 1
         if agent.hunger > 65 or agent.thirst > 65 or agent.energy < 30 or agent.stress > 76 then
@@ -591,43 +663,71 @@ function Behavior.choose(agent, sim)
     end
 
     if projectDrive > 0 then
-        if project.kind == "stockpile" then
-            scores.gather = scores.gather + 16 * projectDrive
-            scores.searchFood = scores.searchFood + math.max(0, 10 - agent.inventory.food) * 1.1 * projectDrive
-            projectAdd("buildFarm", 12 + scarcity * 1.4)
-            projectAdd("buildPaddock", 8)
-            projectAdd("buildMine", 8)
-            projectAdd("reproduce", 10)
-        elseif project.kind == "develop" then
-            projectAdd("buildHouse", 12)
-            projectAdd("buildFarm", 13)
-            projectAdd("buildPaddock", 11)
-            projectAdd("buildMine", 9)
-            projectAdd("buildWarehouse", 8)
-        elseif project.kind == "housing" then
-            projectAdd("buildHouse", 28)
-            projectAdd("buildFarm", 16)
-            projectAdd("buildPaddock", 16)
-            projectAdd("reproduce", 12)
-            scores.gather = scores.gather + 8 * projectDrive
-        elseif project.kind == "buildWarehouse" then
-            projectAdd("buildWarehouse", 70)
-            scores.gather = scores.gather + 26 * projectDrive
-        elseif project.kind == "buildShrine" then
-            projectAdd("buildShrine", 48)
+        local nationTask = usesCivicAI and sim.assignNationTask and sim:assignNationTask(agent, {
+            localResources = localResources,
+            scores = scores,
+            scarcity = scarcity,
+            overcrowding = overcrowding
+        }) or nil
+        agent.projectTask = nationTask
+
+        if nationTask == "deposit" then
+            projectAdd("useWarehouse", 64)
+        elseif nationTask == "stockpileFood" then
+            scores.searchFood = scores.searchFood + (28 + math.max(0, 12 - agent.inventory.food) * 1.3) * projectDrive
             scores.gather = scores.gather + 10 * projectDrive
-        elseif project.kind == "armament" then
-            scores.gather = scores.gather + 18 * projectDrive
+            projectAdd("buildFarm", 12 + scarcity)
+            projectAdd("buildPaddock", 8)
+        elseif nationTask == "stockpileWood" then
+            scores.gather = scores.gather + 28 * projectDrive
+            if gatherResource ~= "iron" then
+                gatherResource = "wood"
+                targets.gather = cachedResourceAt(sim, rx, ry, gatherResource, 26)
+            end
+        elseif nationTask == "stockpileStone" then
+            scores.gather = scores.gather + 28 * projectDrive
+            if gatherResource ~= "iron" then
+                gatherResource = "stone"
+                targets.gather = cachedResourceAt(sim, rx, ry, gatherResource, 26)
+            end
+        elseif nationTask == "buildHouse" then
+            projectAdd("buildHouse", 54)
+            projectAdd("useWarehouse", 18)
+            scores.gather = scores.gather + 12 * projectDrive
+        elseif nationTask == "buildFarm" then
+            projectAdd("buildFarm", 72)
+            projectAdd("useWarehouse", 14)
+            scores.gather = scores.gather + 10 * projectDrive
+        elseif nationTask == "buildPaddock" then
+            projectAdd("buildPaddock", 66)
+            projectAdd("useWarehouse", 14)
+            scores.gather = scores.gather + 10 * projectDrive
+        elseif nationTask == "buildMine" then
+            projectAdd("buildMine", 62)
+            projectAdd("useWarehouse", 12)
+            scores.gather = scores.gather + 16 * projectDrive
+        elseif nationTask == "buildShrine" then
+            projectAdd("buildShrine", 70)
+            projectAdd("useWarehouse", 12)
+            scores.gather = scores.gather + 12 * projectDrive
+        elseif nationTask == "craftGear" then
+            projectAdd("craftGear", 50)
             projectAdd("buildMine", 18)
-            projectAdd("craftGear", 44)
-            projectScale("reproduce", 0.88)
-        elseif project.kind == "war" then
-            projectScale("socialize", 0.72)
-            projectScale("reproduce", 0.72)
-            projectAdd("craftGear", 34)
-            projectAdd("attackBuilding", 16)
-        elseif project.kind == "exploration" then
-            scores.gather = scores.gather + 8 * projectDrive
+            scores.gather = scores.gather + 18 * projectDrive
+        elseif nationTask == "raid" then
+            projectAdd("craftGear", 28)
+            projectAdd("attack", 24)
+            projectScale("reproduce", 0.82)
+        elseif nationTask == "attackBuilding" then
+            projectAdd("craftGear", 22)
+            projectAdd("attackBuilding", 32)
+            projectScale("reproduce", 0.78)
+        elseif nationTask == "explore" then
+            scores.explore = scores.explore > 0 and scores.explore + 34 * projectDrive or scores.explore
+            scores.gather = scores.gather + 10 * projectDrive
+        elseif nationTask == "reproduce" then
+            projectAdd("reproduce", 34)
+            projectAdd("buildHouse", 12)
         end
     end
 
@@ -660,6 +760,86 @@ function Behavior.choose(agent, sim)
         scores.buildFarm = scores.buildFarm > 0 and scores.buildFarm + 44 or scores.buildFarm
     end
 
+    local function scalePositive(action, factor)
+        if scores[action] and scores[action] > 0 then
+            scores[action] = scores[action] * factor
+        end
+    end
+
+    local function addPositive(action, amount)
+        if scores[action] and scores[action] > 0 then
+            scores[action] = scores[action] + amount
+        end
+    end
+
+    scores.searchFood = scores.searchFood + needState.food * 62 + math.max(0, agent.hunger - 54) * 0.72
+    scores.searchWater = scores.searchWater + needState.water * 72 + math.max(0, agent.thirst - 52) * 0.86
+    addPositive("rest", needState.rest * 48)
+    addPositive("socialize", needState.social * 34 + math.max(0, 44 - (agent.satisfaction or 50)) * 0.18)
+    addPositive("reproduce", needState.reproduce * 38)
+
+    local survivalDominance = clamp((needState.tier1 - 0.56) / 0.36, 0, 1)
+    if survivalDominance > 0 then
+        local projectFactor = 1 - survivalDominance * 0.58
+        local growthFactor = 1 - survivalDominance * 0.45
+        scalePositive("gather", 1 - survivalDominance * 0.22)
+        scalePositive("buildHouse", homeless and (1 - survivalDominance * 0.15) or growthFactor)
+        scalePositive("buildFarm", growthFactor)
+        scalePositive("buildPaddock", growthFactor)
+        scalePositive("buildMine", projectFactor)
+        scalePositive("buildWarehouse", needsSettlementCore and (1 - survivalDominance * 0.10) or projectFactor)
+        scalePositive("buildShrine", projectFactor)
+        scalePositive("craftGear", projectFactor)
+        scalePositive("socialize", 1 - survivalDominance * 0.28)
+        scalePositive("reproduce", 1 - survivalDominance * 0.68)
+        scalePositive("attack", 1 - survivalDominance * 0.35)
+        scalePositive("attackBuilding", 1 - survivalDominance * 0.40)
+        scalePositive("explore", projectFactor)
+    end
+
+    local secondOrderDrive = clamp((needState.tier2 - 0.48) / 0.42, 0, 1) * (1 - survivalDominance * 0.72)
+    if secondOrderDrive > 0 then
+        addPositive("rest", secondOrderDrive * 20)
+        addPositive("socialize", secondOrderDrive * 14)
+        addPositive("reproduce", secondOrderDrive * 13)
+        scalePositive("attack", 1 - secondOrderDrive * 0.22)
+        scalePositive("attackBuilding", 1 - secondOrderDrive * 0.20)
+    end
+
+    local civicRewardDrive = clamp(needState.purpose * (1 - survivalDominance) * (0.65 + math.max(0, prosperity - 45) / 100), 0, 1)
+    if civicRewardDrive > 0.08 and agent.projectTask then
+        if agent.projectTask == "deposit" then
+            addPositive("useWarehouse", 18 * civicRewardDrive)
+        elseif agent.projectTask == "stockpileFood" then
+            scores.searchFood = scores.searchFood + 15 * civicRewardDrive
+            addPositive("buildFarm", 10 * civicRewardDrive)
+            addPositive("buildPaddock", 8 * civicRewardDrive)
+        elseif agent.projectTask == "stockpileWood" or agent.projectTask == "stockpileStone" then
+            scores.gather = scores.gather + 18 * civicRewardDrive
+        elseif agent.projectTask == "buildHouse" then
+            addPositive("buildHouse", 22 * civicRewardDrive)
+        elseif agent.projectTask == "buildFarm" then
+            addPositive("buildFarm", 20 * civicRewardDrive)
+        elseif agent.projectTask == "buildPaddock" then
+            addPositive("buildPaddock", 18 * civicRewardDrive)
+        elseif agent.projectTask == "buildMine" then
+            addPositive("buildMine", 18 * civicRewardDrive)
+        elseif agent.projectTask == "buildShrine" then
+            addPositive("buildShrine", 22 * civicRewardDrive)
+        elseif agent.projectTask == "craftGear" then
+            addPositive("craftGear", 18 * civicRewardDrive)
+            addPositive("buildMine", 8 * civicRewardDrive)
+        elseif agent.projectTask == "reproduce" then
+            addPositive("reproduce", 18 * civicRewardDrive)
+        elseif agent.projectTask == "explore" then
+            addPositive("explore", 20 * civicRewardDrive)
+        elseif agent.projectTask == "raid" or agent.projectTask == "attackBuilding" then
+            addPositive("craftGear", 10 * civicRewardDrive)
+            addPositive("attack", 10 * civicRewardDrive)
+            addPositive("attackBuilding", 12 * civicRewardDrive)
+        end
+    end
+
     local bestAction = "rest"
     local bestScore = scores.rest
     for action, score in pairs(scores) do
@@ -672,7 +852,7 @@ function Behavior.choose(agent, sim)
     bestAction = AgentAI.choose(agent, sim, scores, targets, {
         localResources = localResources,
         community = community,
-        project = project,
+        project = nil,
         scarcity = scarcity,
         overcrowding = overcrowding,
         trustedNear = trustedNear,
@@ -684,7 +864,8 @@ function Behavior.choose(agent, sim)
         overcrowding = overcrowding,
         nearby = #nearby,
         communitySupport = communitySupport,
-        foreignSettlementPressure = foreignPressure
+        foreignSettlementPressure = foreignPressure,
+        diseasePressure = community and (community.diseasePressure or 0) or 0
     }
 end
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import csv
 import json
 import math
 import os
@@ -44,7 +45,7 @@ ACTIONS = [
     "explore",
 ]
 
-PROJECTS = ["none", "stockpile", "housing", "develop", "buildWarehouse", "buildShrine", "armament", "war", "exploration"]
+PROJECTS = ["none"]
 BASE_FEATURES = [
     "hunger",
     "thirst",
@@ -109,7 +110,7 @@ def one_hot(index, size):
 
 
 def random_state():
-    project = random.randrange(len(PROJECTS))
+    project = 0
     hunger = random.betavariate(1.5, 2.2)
     thirst = random.betavariate(1.5, 2.0)
     energy = random.betavariate(2.0, 1.8)
@@ -181,8 +182,8 @@ def valid_actions(state):
     valid["buildHouse"] = 1.0 if state["hasCommunity"] and state["inventoryWood"] > 0.36 and state["inventoryStone"] > 0.16 else 0.0
     valid["buildFarm"] = 1.0 if state["hasCommunity"] and state["inventoryWood"] > 0.22 and state["inventoryStone"] > 0.08 and state["localWater"] > 0.18 else 0.0
     valid["buildPaddock"] = 1.0 if state["hasCommunity"] and state["inventoryWood"] > 0.28 and state["inventoryStone"] > 0.10 and state["inventoryAnimals"] > 0.08 else 0.0
-    valid["buildMine"] = 1.0 if state["hasCommunity"] and state["inventoryWood"] > 0.35 and (state["localStone"] > 0.35 or state["localIron"] > 0.18) and (PROJECTS[state["project"]] in ("armament", "war") or state["prosperity"] > 0.62) else 0.0
-    valid["buildWarehouse"] = 1.0 if state["inventoryWood"] > 0.38 and state["inventoryStone"] > 0.24 and (not state["hasCommunity"] or PROJECTS[state["project"]] == "buildWarehouse") else 0.0
+    valid["buildMine"] = 1.0 if state["hasCommunity"] and state["inventoryWood"] > 0.35 and (state["localStone"] > 0.35 or state["localIron"] > 0.18) and state["prosperity"] > 0.42 else 0.0
+    valid["buildWarehouse"] = 1.0 if state["inventoryWood"] > 0.38 and state["inventoryStone"] > 0.24 and (not state["hasCommunity"] or state["prosperity"] > 0.36) else 0.0
     valid["buildShrine"] = 1.0 if state["hasCommunity"] and state["inventoryWood"] > 0.45 and state["inventoryStone"] > 0.62 else 0.0
     valid["worship"] = 1.0 if state["hasCommunity"] and state["spirituality"] < 0.72 else 0.0
     valid["socialize"] = 1.0 if state["trustedNear"] + state["sameCommunityNear"] > 0.14 else 0.0
@@ -190,86 +191,86 @@ def valid_actions(state):
     valid["formCommunity"] = 1.0 if not state["hasCommunity"] and state["trustedNear"] > 0.42 and state["localWater"] > 0.12 else 0.0
     valid["migrateCommunity"] = 1.0 if state["hasCommunity"] and (state["stress"] > 0.72 or state["overcrowding"] > 0.72) else 0.0
     valid["reproduce"] = 1.0 if state["hasHome"] and state["fertility"] > 0.46 and state["prosperity"] > 0.42 and state["stress"] < 0.68 else 0.0
-    valid["craftGear"] = 1.0 if state["inventoryIron"] > 0.45 and (PROJECTS[state["project"]] in ("armament", "war") or state["prosperity"] > 0.68) else 0.0
-    valid["attack"] = 1.0 if state["aggression"] > 0.82 and PROJECTS[state["project"]] == "war" else 0.0
-    valid["attackBuilding"] = 1.0 if state["aggression"] > 0.72 and PROJECTS[state["project"]] == "war" else 0.0
-    valid["explore"] = 1.0 if state["prosperity"] > 0.66 and PROJECTS[state["project"]] == "exploration" else 0.0
+    valid["craftGear"] = 1.0 if state["inventoryIron"] > 0.45 and (state["aggression"] > 0.46 or state["prosperity"] > 0.68) else 0.0
+    valid["attack"] = 1.0 if state["aggression"] > 0.88 and state["prosperity"] > 0.34 else 0.0
+    valid["attackBuilding"] = 1.0 if state["aggression"] > 0.78 and state["prosperity"] > 0.34 else 0.0
+    valid["explore"] = 1.0 if state["prosperity"] > 0.66 and state["hasCommunity"] and state["communityMembers"] > 0.16 else 0.0
     return valid
 
 
 def reward(state, action):
-    p = PROJECTS[state["project"]]
     r = 0.0
     hunger = state["hunger"]
     thirst = state["thirst"]
     energy_need = 1.0 - state["energy"]
-    poverty = 1.0 - state["prosperity"]
+    stress = state["stress"]
     survival = max(hunger, thirst, energy_need)
-    death_risk = clamp(max(hunger - 0.86, thirst - 0.86, energy_need - 0.90) / 0.14)
-    civilization_room = clamp((state["prosperity"] - 0.34) / 0.46) * clamp(1.0 - survival / 0.92)
+    death_risk = clamp(max(hunger - 0.86, thirst - 0.86, energy_need - 0.90, stress - 0.93) / 0.14)
+    survival_margin = min(1.0 - hunger, 1.0 - thirst, state["energy"], state["health"])
+    civilization_room = clamp((state["prosperity"] - 0.32) / 0.50) * clamp((survival_margin - 0.22) / 0.45)
     community_scale = state["hasCommunity"] * (0.45 + state["communityMembers"] * 0.75)
+    second_order_room = clamp((survival_margin - 0.24) / 0.48)
+    long_life_margin = clamp((survival_margin - 0.18) / 0.56)
+    strategic_room = civilization_room * (0.65 + long_life_margin * 0.35)
+    carried = max(state["inventoryFood"], state["inventoryWood"], state["inventoryStone"], state["inventoryIron"], state["inventoryAnimals"])
 
     if action == "searchWater":
-        r += thirst * 4.2 + (1.6 if thirst > 0.72 else 0.0)
+        r += thirst * 4.4 + death_risk * 2.3 + (1.6 if thirst > 0.72 else 0.0)
     elif action == "searchFood":
-        r += hunger * 3.7 + poverty * 0.8 + state["scarcity"] * 1.2
+        r += hunger * 3.8 + state["scarcity"] * 1.0 + death_risk * 1.8
     elif action == "rest":
-        r += energy_need * 3.1 + state["stress"] * 1.3
+        r += energy_need * 3.4 + stress * 1.45 + (1.0 if state["hasHome"] else -1.0)
     elif action == "gather":
-        r += poverty * 1.6 + state["scarcity"] * 1.4 + (0.55 if p == "stockpile" else 0.0)
-        r += max(0.0, 0.55 - state["inventoryWood"]) + max(0.0, 0.45 - state["inventoryStone"])
+        r += state["scarcity"] * 0.9 + strategic_room * 1.0
+        r += max(0.0, 0.55 - state["inventoryWood"]) * 1.1 + max(0.0, 0.45 - state["inventoryStone"]) * 1.2
         if not state["hasCommunity"]:
             r += max(0.0, 0.42 - state["inventoryWood"]) * 2.2 + max(0.0, 0.28 - state["inventoryStone"]) * 2.8
-        elif max(state["inventoryFood"], state["inventoryWood"], state["inventoryStone"], state["inventoryIron"], state["inventoryAnimals"]) > 0.34:
-            r -= 1.7
+        elif carried > 0.42:
+            r -= 1.2
     elif action == "useWarehouse":
-        carried = max(state["inventoryFood"], state["inventoryWood"], state["inventoryStone"], state["inventoryIron"], state["inventoryAnimals"])
-        r += state["hasCommunity"] * (state["hunger"] * 1.4 + poverty * 0.8 + state["inventoryFood"] * 1.4)
-        r += state["hasCommunity"] * carried * 4.2
-        if p == "stockpile":
-            r += state["hasCommunity"] * carried * 1.4
+        r += state["hasCommunity"] * (hunger * 1.25 + carried * 4.6 + state["prosperity"] * 0.35)
     elif action == "buildHouse":
-        r += state["housingShortage"] * 4.0 + state["prosperity"] * 1.2 + civilization_room * (1.7 + community_scale) + (1.0 if p in ("housing", "develop", "exploration") else 0.0)
+        r += state["housingShortage"] * 4.5 + state["prosperity"] * 1.0 + strategic_room * (2.0 + community_scale)
+        if not state["hasHome"]:
+            r += 1.4
     elif action == "buildFarm":
-        r += state["scarcity"] * 3.0 + state["communityMembers"] * 0.9 + civilization_room * (1.25 + community_scale) + (0.8 if p in ("housing", "develop", "stockpile") else 0.0)
+        r += state["scarcity"] * 2.9 + state["communityMembers"] * 0.8 + strategic_room * (1.45 + community_scale)
     elif action == "buildPaddock":
-        r += state["scarcity"] * 1.7 + state["localAnimals"] * 1.4 + civilization_room * 0.8 + (0.45 if p in ("stockpile", "housing") else 0.0)
+        r += state["scarcity"] * 1.4 + state["localAnimals"] * 1.5 + strategic_room * 1.0
     elif action == "buildMine":
-        r += state["localIron"] * 1.4 + state["localStone"] * 0.45 + civilization_room * 0.35 + (2.2 if p in ("armament", "war") else -0.6)
+        r += state["localIron"] * 1.4 + state["localStone"] * 0.45 + strategic_room * 0.65 + state["aggression"] * 0.25
     elif action == "buildWarehouse":
         if state["hasCommunity"]:
-            r += state["communityMembers"] * 1.3 + state["prosperity"] * 1.0 + civilization_room * (1.4 + community_scale) + (1.4 if p == "buildWarehouse" else 0.0)
+            r += state["communityMembers"] * 1.0 + state["prosperity"] * 0.8 + strategic_room * (1.2 + community_scale)
         else:
             r += 5.2 + state["trustedNear"] * 1.4 + state["localWater"] * 0.9 + state["inventoryWood"] * 0.8 + state["inventoryStone"] * 1.2
     elif action == "buildShrine":
-        r += (1.0 - state["spirituality"]) * 2.8 + state["communityMembers"] * 0.8 + civilization_room * (1.0 + community_scale) + (2.0 if p == "buildShrine" else 0.0)
+        r += (1.0 - state["spirituality"]) * 2.8 + state["communityMembers"] * 0.6 + strategic_room * (0.9 + community_scale)
     elif action == "worship":
-        r += (1.0 - state["spirituality"]) * 3.2 + state["stress"] * 0.9
+        r += (1.0 - state["spirituality"]) * 3.2 + stress * 0.9
     elif action == "socialize":
-        r += state["socialNeed"] * 2.1 + state["trustedNear"] * 1.0 + state["sameCommunityNear"] * 1.0
+        r += state["socialNeed"] * 2.25 + state["trustedNear"] * 1.0 + state["sameCommunityNear"] * 1.0 + second_order_room * 0.5
     elif action == "help":
-        r += state["trustedNear"] * 2.4 + state["inventoryFood"] * 0.6 + state["communityProsperity"] * 0.4 + civilization_room * 0.8
+        r += state["trustedNear"] * 2.4 + state["inventoryFood"] * 0.6 + state["communityProsperity"] * 0.4 + strategic_room * 0.8
     elif action == "formCommunity":
         r += (1.0 - state["hasCommunity"]) * 1.0 + state["trustedNear"] * 1.4 + state["localWater"] * 0.5
         if state["inventoryWood"] > 0.38 and state["inventoryStone"] > 0.24:
             r -= 1.8
     elif action == "migrateCommunity":
-        r += state["stress"] * 1.6 + state["overcrowding"] * 1.8 + state["scarcity"] * 1.0
+        r += stress * 1.6 + state["overcrowding"] * 1.8 + state["scarcity"] * 1.0
     elif action == "reproduce":
-        r += state["fertility"] * 1.7 + state["prosperity"] * 1.7 + state["hasHome"] * 1.2 + civilization_room * 0.9 - state["stress"] * 1.1
-        if p == "housing":
-            r += 0.45
+        r += state["fertility"] * 1.7 + state["prosperity"] * 1.65 + state["hasHome"] * 1.35 + second_order_room * 1.0 - stress * 1.05
     elif action == "craftGear":
-        r += state["inventoryIron"] * 1.8 + (2.2 if p in ("armament", "war") else 0.1)
+        r += state["inventoryIron"] * 1.2 + state["aggression"] * 0.7 + strategic_room * 0.2
     elif action == "attack":
-        r += (3.2 if p == "war" else -3.2) + state["aggression"] * 1.1 - max(0.0, 0.72 - survival) * 2.5
+        r += state["aggression"] * 1.0 - max(0.0, 0.72 - survival) * 3.0 - (1.1 if state["trustedNear"] > 0.25 else 0.0)
     elif action == "attackBuilding":
-        r += (3.0 if p == "war" else -3.0) + state["aggression"] * 0.8
+        r += state["aggression"] * 0.75 + state["prosperity"] * 0.2 - (0.8 if state["sameCommunityNear"] > 0.3 else 0.0)
     elif action == "explore":
-        r += state["prosperity"] * 1.8 + state["communityMembers"] * 1.2 + civilization_room * 2.0 + (2.2 if p == "exploration" else -0.4)
+        r += state["prosperity"] * 1.3 + state["communityMembers"] * 0.8 + strategic_room * 1.6
 
     if death_risk > 0 and action not in ("searchFood", "searchWater", "rest", "migrateCommunity", "help"):
-        r -= 6.5 * death_risk
+        r -= 8.5 * death_risk
     if thirst > 0.90 and action != "searchWater":
         r -= 5.8 * clamp((thirst - 0.90) / 0.10)
     if hunger > 0.90 and action not in ("searchFood", "help"):
@@ -278,15 +279,25 @@ def reward(state, action):
         r -= 4.3 * clamp((energy_need - 0.92) / 0.08)
     if state["prosperity"] < 0.30 and action.startswith("build") and action != "buildWarehouse":
         r -= 1.8
+    if state["prosperity"] < 0.30 and action in ("reproduce", "craftGear", "attack", "attackBuilding", "explore"):
+        r -= 3.0
+    if survival > 0.64 and action in ("buildHouse", "buildFarm", "buildPaddock", "buildMine", "buildShrine", "craftGear", "attack", "attackBuilding", "explore", "reproduce"):
+        r -= (survival - 0.64) * 4.2
     if not state["hasCommunity"] and action not in ("searchFood", "searchWater", "rest", "gather", "buildWarehouse", "socialize", "help"):
         r -= 2.6
-    if action in ("attack", "attackBuilding") and p != "war":
-        r -= 4.0
+    if action in ("attack", "attackBuilding") and state["aggression"] < 0.92:
+        r -= 2.8
     return r
 
 
 def make_sample():
     state = random_state()
+    return sample_from_state(state)
+
+
+def sample_from_state(state):
+    state = dict(state)
+    state["project"] = 0
     valid = valid_actions(state)
     rewards = []
     for action in ACTIONS:
@@ -301,11 +312,28 @@ def make_sample():
     return Sample(features, label)
 
 
-def dataset(samples):
-    rows = [make_sample() for _ in range(samples)]
+def read_real_states(path, limit=0):
+    rows = []
+    with open(path, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for item in reader:
+            state = {name: clamp(float(item.get(name, 0.0))) for name in BASE_FEATURES}
+            rows.append(sample_from_state(state))
+            if limit and len(rows) >= limit:
+                break
+    return rows
+
+
+def dataset(samples, real_data=None, real_limit=0, synthetic_ratio=0.25):
+    rows = []
+    if real_data:
+        rows.extend(read_real_states(real_data, real_limit))
+    synthetic_count = samples if not rows else max(0, int(len(rows) * synthetic_ratio))
+    rows.extend(make_sample() for _ in range(synthetic_count))
+    random.shuffle(rows)
     x = torch.tensor([row.x for row in rows], dtype=torch.float32)
     y = torch.tensor([row.y for row in rows], dtype=torch.long)
-    return x, y
+    return x, y, len(rows)
 
 
 def lua_number(v):
@@ -365,12 +393,15 @@ def main():
     parser.add_argument("--epochs", type=int, default=18)
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--seed", type=int, default=20260522)
+    parser.add_argument("--real-data", default=None)
+    parser.add_argument("--real-limit", type=int, default=0)
+    parser.add_argument("--synthetic-ratio", type=float, default=0.25)
     args = parser.parse_args()
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
-    x, y = dataset(args.samples)
-    split = int(args.samples * 0.88)
+    x, y, sample_count = dataset(args.samples, args.real_data, args.real_limit, args.synthetic_ratio)
+    split = int(sample_count * 0.88)
     train_x, train_y = x[:split], y[:split]
     val_x, val_y = x[split:], y[split:]
 
@@ -396,7 +427,14 @@ def main():
 
     with torch.no_grad():
         val_acc = (model(val_x).argmax(dim=1) == val_y).float().mean().item()
-    metrics = {"samples": args.samples, "epochs": args.epochs, "val_accuracy": round(val_acc, 4), "seed": args.seed}
+    metrics = {
+        "samples": sample_count,
+        "epochs": args.epochs,
+        "val_accuracy": round(val_acc, 4),
+        "seed": args.seed,
+        "real_data": bool(args.real_data),
+        "synthetic_ratio": args.synthetic_ratio if args.real_data else 1.0
+    }
     write_lua_model(model, metrics)
     print("exported", OUT_LUA, metrics)
 

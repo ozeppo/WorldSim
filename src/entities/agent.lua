@@ -10,6 +10,30 @@ Agent.__index = Agent
 
 local SWORD_COST = { iron = 6, wood = 4 }
 local ARMOR_COST = { iron = 10 }
+local NEED_CLOCK_DEFAULTS = {
+    lastAteTick = 55,
+    lastDrankTick = 45,
+    lastRestTick = 120,
+    lastSocialTick = 160,
+    lastReproducedTick = 640,
+    lastTaskRewardTick = 260
+}
+local TASK_ACTION_MATCH = {
+    deposit = { useWarehouse = true },
+    stockpileFood = { searchFood = true, gather = true, useWarehouse = true, buildFarm = true, buildPaddock = true },
+    stockpileWood = { gather = true, useWarehouse = true },
+    stockpileStone = { gather = true, useWarehouse = true, buildMine = true },
+    buildHouse = { buildHouse = true, gather = true, useWarehouse = true },
+    buildFarm = { buildFarm = true, gather = true, useWarehouse = true },
+    buildPaddock = { buildPaddock = true, gather = true, useWarehouse = true },
+    buildMine = { buildMine = true, gather = true, useWarehouse = true },
+    buildShrine = { buildShrine = true, worship = true, gather = true, useWarehouse = true },
+    craftGear = { craftGear = true, gather = true, useWarehouse = true, buildMine = true },
+    raid = { attack = true, craftGear = true },
+    attackBuilding = { attackBuilding = true, craftGear = true },
+    explore = { explore = true, buildWarehouse = true, buildHouse = true },
+    reproduce = { reproduce = true, buildHouse = true }
+}
 
 local function clamp(v, lo, hi)
     return math.max(lo, math.min(hi, v))
@@ -37,6 +61,8 @@ function Agent.new(id, x, y)
         fertility = math.random(24, 72),
         health = 100,
         injury = 0,
+        disease = 0,
+        immunity = math.random(18, 58),
         communityId = nil,
         settleX = nil,
         settleY = nil,
@@ -47,6 +73,16 @@ function Agent.new(id, x, y)
         personalProsperity = 0,
         communityProsperity = 0,
         prosperity = 0,
+        satisfaction = math.random(42, 68),
+        purpose = math.random(24, 52),
+        rewardMemory = 0,
+        needTier = 1,
+        lastAteTick = nil,
+        lastDrankTick = nil,
+        lastRestTick = nil,
+        lastSocialTick = nil,
+        lastReproducedTick = nil,
+        lastTaskRewardTick = nil,
         parentA = nil,
         parentB = nil,
         children = {},
@@ -64,6 +100,7 @@ function Agent.new(id, x, y)
         sword = false,
         armor = false,
         boatDurability = 0,
+        oceanBoat = false,
         planAction = nil,
         planTarget = nil,
         planTicks = 0,
@@ -120,18 +157,147 @@ function Agent:healthScore()
     return clamp(100 - self.hunger * 0.45 - self.thirst * 0.55 - self.stress * 0.25 - self.injury, 0, 100)
 end
 
+function Agent:wellbeing(field)
+    if field == "fullness" then
+        return 100 - (self.hunger or 0)
+    elseif field == "hydration" then
+        return 100 - (self.thirst or 0)
+    elseif field == "calm" then
+        return 100 - (self.stress or 0)
+    elseif field == "social" then
+        return 100 - (self.socialNeed or 0)
+    elseif field == "peace" then
+        return 100 - (self.aggression or 0)
+    end
+    return self[field] or 0
+end
+
+function Agent:ensureNeedClocks(tick)
+    tick = tick or 0
+    for field, age in pairs(NEED_CLOCK_DEFAULTS) do
+        if not self[field] then
+            self[field] = math.max(0, tick - age - math.random(0, 24))
+        end
+    end
+end
+
+function Agent:ticksSince(field, tick, fallback)
+    tick = tick or 0
+    local last = self[field]
+    if not last then
+        return fallback or 0
+    end
+    return math.max(0, tick - last)
+end
+
+function Agent:needState(tick)
+    tick = tick or 0
+    self:ensureNeedClocks(tick)
+    local foodClock = clamp(self:ticksSince("lastAteTick", tick, 100) / 165, 0, 1)
+    local waterClock = clamp(self:ticksSince("lastDrankTick", tick, 80) / 135, 0, 1)
+    local restClock = clamp(self:ticksSince("lastRestTick", tick, 140) / 280, 0, 1)
+    local socialClock = clamp(self:ticksSince("lastSocialTick", tick, 180) / 340, 0, 1)
+    local reproductionClock = self.age > 18 and clamp(self:ticksSince("lastReproducedTick", tick, 600) / 980, 0, 1) or 0
+    local taskClock = self.communityId and clamp(self:ticksSince("lastTaskRewardTick", tick, 260) / 520, 0, 1) or 0
+
+    local food = clamp(self.hunger / 100 * 0.66 + foodClock * 0.34, 0, 1)
+    local water = clamp(self.thirst / 100 * 0.68 + waterClock * 0.32, 0, 1)
+    local rest = clamp((100 - self.energy) / 100 * 0.52 + self.stress / 100 * 0.16 + restClock * 0.32, 0, 1)
+    local social = clamp(self.socialNeed / 100 * 0.68 + socialClock * 0.32, 0, 1)
+    local reproduce = clamp((self.fertility or 0) / 100 * 0.42 + reproductionClock * 0.38 + (self.prosperity or 0) / 100 * 0.20, 0, 1)
+    local purpose = clamp((100 - (self.purpose or 40)) / 100 * 0.48 + taskClock * 0.52, 0, 1)
+
+    return {
+        food = food,
+        water = water,
+        rest = rest,
+        social = social,
+        reproduce = reproduce,
+        purpose = purpose,
+        tier1 = math.max(food, water),
+        tier2 = math.max(rest, social, reproduce * 0.86),
+        tier3 = purpose
+    }
+end
+
+function Agent:recordNeed(kind, tick, reward)
+    tick = tick or (self.currentSim and self.currentSim.tick) or 0
+    reward = reward or 0
+    if kind == "food" then
+        self.lastAteTick = tick
+    elseif kind == "water" then
+        self.lastDrankTick = tick
+    elseif kind == "rest" then
+        self.lastRestTick = tick
+    elseif kind == "social" then
+        self.lastSocialTick = tick
+    elseif kind == "reproduce" then
+        self.lastReproducedTick = tick
+    end
+    self.satisfaction = clamp((self.satisfaction or 50) + reward, 0, 100)
+end
+
+function Agent:rewardTaskCompletion(action, sim)
+    local task = self.projectTask
+    if not task or not action or not sim then
+        return
+    end
+    local match = TASK_ACTION_MATCH[task]
+    if not match or not match[action] then
+        return
+    end
+    if sim.tick - (self.lastTaskRewardTick or -9999) < 10 then
+        return
+    end
+
+    local reward = 5.5
+    if action == "buildHouse" or action == "buildWarehouse" or action == "buildShrine" or action == "reproduce" then
+        reward = 9
+    elseif action == "attack" or action == "attackBuilding" then
+        reward = 4
+    end
+    local survivalPenalty = clamp((math.max(0, self.hunger - 70) + math.max(0, self.thirst - 70)) / 80, 0, 0.55)
+    reward = reward * (1 - survivalPenalty)
+
+    self.lastTaskRewardTick = sim.tick
+    self.rewardMemory = clamp((self.rewardMemory or 0) * 0.72 + reward * 2.2, 0, 100)
+    self.satisfaction = clamp((self.satisfaction or 50) + reward * 0.72, 0, 100)
+    self.purpose = clamp((self.purpose or 35) + reward, 0, 100)
+    self.stress = clamp(self.stress - reward * 0.35, 0, 100)
+
+    if sim.releaseCivicTask then
+        sim:releaseCivicTask(self)
+    else
+        self.nationTask = nil
+        self.nationTaskTick = nil
+        self.nationTaskNationId = nil
+        self.nationTaskExpires = nil
+    end
+    self.projectTask = nil
+end
+
 function Agent:updateNeeds(world, context)
+    local tick = context.tick or 0
+    self:ensureNeedClocks(tick)
     local comfort = world:comfortAt(self.x, self.y)
     local support = context.communitySupport or 0
     local borderPressure = context.foreignSettlementPressure or 0
     local homeStability = self.homeId and 1 or 0
+    local needs = self:needState(tick)
     self.age = self.age + 0.02
-    self.hunger = clamp(self.hunger + 0.84 - homeStability * 0.12 - self.inventory.food * 0.014, 0, 100)
-    self.thirst = clamp(self.thirst + 1.05 - homeStability * 0.10, 0, 100)
-    self.energy = clamp(self.energy - 0.76 - homeStability * 0.08 - self.injury * 0.015, 0, 100)
-    self.socialNeed = clamp(self.socialNeed + 0.7 - support * 0.05, 0, 100)
+    local productivity = self.currentSim and self.currentSim.agentProductivity or 1
+    local diseasePressure = context.diseasePressure or 0
+    self.hunger = clamp(self.hunger + (0.84 / productivity) - homeStability * 0.12 - self.inventory.food * 0.014, 0, 100)
+    self.thirst = clamp(self.thirst + (1.05 / productivity) - homeStability * 0.10, 0, 100)
+    self.energy = clamp(self.energy - (0.76 / productivity) - homeStability * 0.08 - self.injury * 0.015 - (self.disease or 0) * 0.018, 0, 100)
+    self.socialNeed = clamp(self.socialNeed + 0.7 + needs.social * 0.12 - support * 0.05, 0, 100)
     self.spirituality = clamp(self.spirituality - 0.28 - math.max(0, self.stress - 55) * 0.012, 0, 100)
-    self.stress = clamp(self.stress + context.scarcity * 0.32 + context.overcrowding * 0.42 + borderPressure * 0.45 - comfort * 0.16 - support * 0.18, 0, 100)
+    self.satisfaction = clamp((self.satisfaction or 50) - 0.045 - needs.tier1 * 0.13 - math.max(0, self.stress - 62) * 0.012 + support * 0.018 + comfort * 0.012, 0, 100)
+    self.purpose = clamp((self.purpose or 35) - 0.035 - needs.tier1 * 0.06 + (self.rewardMemory or 0) * 0.002, 0, 100)
+    self.rewardMemory = clamp((self.rewardMemory or 0) * 0.992, 0, 100)
+    self.needTier = needs.tier1 > 0.68 and 1 or (needs.tier2 > 0.58 and 2 or 3)
+    local rewardStress = math.max(0, 42 - (self.satisfaction or 50)) * 0.026 + math.max(0, 34 - (self.purpose or 35)) * 0.016
+    self.stress = clamp(self.stress + context.scarcity * 0.32 + context.overcrowding * 0.42 + borderPressure * 0.45 + diseasePressure * 0.18 + rewardStress - comfort * 0.16 - support * 0.18, 0, 100)
 
     local survivalPressure = math.max(0, self.hunger - 82) * 0.18 + math.max(0, self.thirst - 86) * 0.22
     local memoryPressure = self.memory:negativePressure()
@@ -150,6 +316,14 @@ function Agent:updateNeeds(world, context)
         self.health = self.health - 0.35
     end
 
+    if (self.disease or 0) > 0 then
+        self.health = self.health - (self.disease or 0) * 0.018
+        self.disease = clamp((self.disease or 0) - 0.18 - (self.immunity or 30) * 0.002 + diseasePressure * 0.015, 0, 100)
+        self.immunity = clamp((self.immunity or 30) + 0.015, 0, 100)
+    elseif diseasePressure > 0 and math.random() < diseasePressure * 0.00055 * math.max(0.25, 1 - (self.immunity or 30) / 140) then
+        self.disease = math.random(18, 42)
+    end
+
     if self.health <= 0 or self.age > 90 + math.random() * 12 then
         self.alive = false
     end
@@ -161,21 +335,30 @@ function Agent:enterTile(world, x, y)
         return false
     end
 
-    if tile.type == Resources.TILE.water or tile.type == Resources.TILE.shallowWater then
-        if (self.boatDurability or 0) <= 0 then
-            if self.inventory.wood < World.BOAT_COST and self.currentSim then
-                self.inventory.wood = self.inventory.wood + self.currentSim:withdrawCommunityResource(self, "wood", World.BOAT_COST - self.inventory.wood)
+    if tile.type == Resources.TILE.water or tile.type == Resources.TILE.shallowWater or tile.type == Resources.TILE.ocean then
+        local ocean = tile.type == Resources.TILE.ocean
+        local requiredWood = ocean and World.OCEAN_BOAT_COST or World.BOAT_COST
+        local requiredDurability = ocean and World.OCEAN_BOAT_DURABILITY or World.BOAT_DURABILITY
+        local needsBoat = (self.boatDurability or 0) <= 0 or (ocean and not self.oceanBoat)
+        if needsBoat then
+            if self.inventory.wood < requiredWood and self.currentSim then
+                self.inventory.wood = self.inventory.wood + self.currentSim:withdrawCommunityResource(self, "wood", requiredWood - self.inventory.wood)
             end
-            if self.inventory.wood < World.BOAT_COST then
+            if self.inventory.wood < requiredWood then
                 return false
             end
-            self.inventory.wood = self.inventory.wood - World.BOAT_COST
-            self.boatDurability = World.BOAT_DURABILITY
+            self.inventory.wood = self.inventory.wood - requiredWood
+            self.boatDurability = requiredDurability
+            self.oceanBoat = ocean
         end
-        self.boatDurability = math.max(0, self.boatDurability - 1)
-        self.energy = clamp(self.energy - 1.15, 0, 100)
+        self.boatDurability = math.max(0, self.boatDurability - (ocean and World.OCEAN_DURABILITY_COST or 1))
+        if self.boatDurability <= 0 then
+            self.oceanBoat = false
+        end
+        self.energy = clamp(self.energy - (ocean and 1.45 or 1.15), 0, 100)
     else
-        self.energy = clamp(self.energy - 0.8, 0, 100)
+        local roadBonus = (tile.type == Resources.TILE.path or tile.type == Resources.TILE.port) and 0.45 or 1
+        self.energy = clamp(self.energy - 0.8 * roadBonus, 0, 100)
     end
 
     self.x = x
@@ -224,7 +407,9 @@ function Agent:moveToward(world, tx, ty)
         return true
     end
 
-    local key = destX .. "," .. destY .. ":" .. tostring((self.boatDurability or 0) > 0 or self.inventory.wood >= World.BOAT_COST)
+    local canBoat = (self.boatDurability or 0) > 0 or self.inventory.wood >= World.BOAT_COST
+    local canOcean = (self.oceanBoat and (self.boatDurability or 0) > 0) or self.inventory.wood >= World.OCEAN_BOAT_COST
+    local key = destX .. "," .. destY .. ":" .. tostring(canBoat) .. ":" .. tostring(canOcean)
     local manhattan = math.abs(self.x - destX) + math.abs(self.y - destY)
     if manhattan <= 10 then
         local best
@@ -293,8 +478,9 @@ function Agent:eat()
     end
     if self.inventory.food > 0 and self.hunger > 34 then
         self.inventory.food = self.inventory.food - 1
-        self.hunger = clamp(self.hunger - 38, 0, 100)
-        self.stress = clamp(self.stress - 2, 0, 100)
+        self.hunger = 0
+        self.stress = clamp(self.stress - 4, 0, 100)
+        self:recordNeed("food", self.currentSim and self.currentSim.tick or 0, 4.5)
         return true
     end
     if self.hunger > 68 then
@@ -303,8 +489,9 @@ function Agent:eat()
         end
         if (self.inventory.animals or 0) > 0 then
             self.inventory.animals = self.inventory.animals - 1
-            self.hunger = clamp(self.hunger - 52, 0, 100)
-            self.stress = clamp(self.stress - 1.4, 0, 100)
+            self.hunger = 0
+            self.stress = clamp(self.stress - 3, 0, 100)
+            self:recordNeed("food", self.currentSim and self.currentSim.tick or 0, 5.5)
             return true
         end
     end
@@ -319,7 +506,8 @@ function Agent:performSearchFood(world, target)
     if target then
         if dist(self.x, self.y, target.x, target.y) <= 1.1 or self:moveToward(world, target.x, target.y) then
             local resource = target.resource or "food"
-            local amount = world:gather(target.x, target.y, resource, resource == "animals" and 3 or 12)
+            local productivity = self.currentSim and self.currentSim.agentProductivity or 1
+            local amount = world:gather(target.x, target.y, resource, (resource == "animals" and 3 or 12) * productivity)
             self.inventory[resource] = (self.inventory[resource] or 0) + amount
             if amount > 0 then
                 self:eat()
@@ -337,8 +525,9 @@ end
 function Agent:performSearchWater(world, target)
     if target then
         if dist(self.x, self.y, target.x, target.y) <= 1.1 or self:moveToward(world, target.x, target.y) then
-            self.thirst = clamp(self.thirst - 58, 0, 100)
-            self.stress = clamp(self.stress - 3, 0, 100)
+            self.thirst = 0
+            self.stress = clamp(self.stress - 4, 0, 100)
+            self:recordNeed("water", self.currentSim and self.currentSim.tick or 0, 4.5)
             return self.thirst < 25
         end
     else
@@ -365,10 +554,11 @@ function Agent:performRest(world)
     end
     local houseBonus = 2.2
     local comfort = world:comfortAt(self.x, self.y)
-    self.energy = clamp(self.energy + 9 * houseBonus, 0, 100)
-    self.stress = clamp(self.stress - 2.5 * houseBonus - comfort * 0.05, 0, 100)
+    self.energy = 100
+    self.stress = clamp(self.stress - 10 - comfort * 0.06, 0, 100)
     self.injury = clamp(self.injury - 0.7 * houseBonus, 0, 100)
-    return self.energy > 84 and self.stress < 35
+    self:recordNeed("rest", self.currentSim and self.currentSim.tick or 0, 2.8)
+    return true
 end
 
 function Agent:performGather(world, target)
@@ -393,7 +583,8 @@ function Agent:performGather(world, target)
 
     if target then
         if dist(self.x, self.y, target.x, target.y) <= 1.1 or self:moveToward(world, target.x, target.y) then
-            local amount = world:gather(target.x, target.y, resource, 6)
+            local productivity = self.currentSim and self.currentSim.agentProductivity or 1
+            local amount = world:gather(target.x, target.y, resource, 6 * productivity)
             self.inventory[resource] = (self.inventory[resource] or 0) + amount
             self.energy = clamp(self.energy - amount * 0.4, 0, 100)
             return amount <= 0 or (self.inventory.wood >= 52 and self.inventory.stone >= 34 and (self.inventory.iron or 0) >= 12)
@@ -454,6 +645,7 @@ function Agent:performCraftGear()
     if crafted then
         self.energy = clamp(self.energy - 8, 0, 100)
         self.stress = clamp(self.stress - 3, 0, 100)
+        self.satisfaction = clamp((self.satisfaction or 50) + 4, 0, 100)
         return true
     end
     return true
@@ -493,6 +685,8 @@ function Agent:performBuild(world, kind, site)
                 self.homeX = building.x
                 self.homeY = building.y
             end
+            self.satisfaction = clamp((self.satisfaction or 50) + (kind == "house" and 8 or 5), 0, 100)
+            self.purpose = clamp((self.purpose or 35) + 4, 0, 100)
             self.stress = clamp(self.stress - 8, 0, 100)
             self.energy = clamp(self.energy - 8, 0, 100)
             for _, other in ipairs(contributors) do
@@ -517,9 +711,11 @@ function Agent:performSocialize(other, sim)
         return false
     end
 
-    self.socialNeed = clamp(self.socialNeed - 22, 0, 100)
-    self.stress = clamp(self.stress - 4, 0, 100)
-    other.socialNeed = clamp(other.socialNeed - 10, 0, 100)
+    self.socialNeed = 0
+    self.stress = clamp(self.stress - 5, 0, 100)
+    other.socialNeed = clamp(other.socialNeed - 24, 0, 100)
+    self:recordNeed("social", sim.tick, 4)
+    other:recordNeed("social", sim.tick, 2)
     self.memory:record(other.id, "social", 1, sim.tick)
     other.memory:record(self.id, "social", 1, sim.tick)
     if self.communityId and not other.communityId and self.memory:trust(other.id) > 12 then
@@ -548,6 +744,8 @@ function Agent:performHelp(other, sim)
         self.memory:record(other.id, "help", 1.2, sim.tick)
         other.memory:record(self.id, "help", 1.8, sim.tick)
         self.socialNeed = clamp(self.socialNeed - 8, 0, 100)
+        self:recordNeed("social", sim.tick, 3)
+        other.satisfaction = clamp((other.satisfaction or 50) + 3, 0, 100)
     else
         other.memory:record(self.id, "refused", 0.6, sim.tick)
     end
@@ -666,16 +864,14 @@ function Agent:performReproduce(partner, sim)
 
     local home = sim:getBuilding(self.homeId)
     local partnerHome = sim:getBuilding(partner.homeId)
-    local familyHome = sim:nearestHouse(self.x, self.y, self.communityId or partner.communityId, true)
-        or (home and (home.occupants or 0) < (home.capacity or 2) and home)
-        or (partnerHome and (partnerHome.occupants or 0) < (partnerHome.capacity or 2) and partnerHome)
+    local familyHome = home or partnerHome or sim:nearestHouse(self.x, self.y, self.communityId or partner.communityId, false)
     local nearbyResources = sim.world:resourcePressureAround(self.homeX or self.x, self.homeY or self.y, 9)
     local storedFood = 0
     local community = (self.communityId or partner.communityId) and sim.communities[self.communityId or partner.communityId]
     if community and community.store then
         storedFood = (community.store.food or 0) + (community.store.animals or 0) * 1.8
     end
-    if familyHome and (familyHome.occupants or 0) < (familyHome.capacity or 2) and (nearbyResources.food + nearbyResources.animals * 1.6 + storedFood) > 58 and nearbyResources.water > 0 and self.energy > 34 and partner.energy > 32 then
+    if familyHome and (nearbyResources.food + nearbyResources.animals * 1.6 + storedFood) > 42 and nearbyResources.water > 0 and self.energy > 34 and partner.energy > 32 then
         local childX, childY = sim.world:findRandomWalkable()
         for _, p in ipairs(sim.world:neighbors(familyHome.x, familyHome.y)) do
             if sim.world:isWalkable(p.x, p.y) then
@@ -689,9 +885,11 @@ function Agent:performReproduce(partner, sim)
         child.parentA = self.id
         child.parentB = partner.id
         child.communityId = self.communityId or partner.communityId
-        child.homeId = familyHome.id
-        child.homeX = familyHome.x
-        child.homeY = familyHome.y
+        if (familyHome.occupants or 0) < (familyHome.capacity or 2) then
+            child.homeId = familyHome.id
+            child.homeX = familyHome.x
+            child.homeY = familyHome.y
+        end
         child.settleX = familyHome.x
         child.settleY = familyHome.y
         self.children[child.id] = true
@@ -709,6 +907,10 @@ function Agent:performReproduce(partner, sim)
         partner.energy = clamp(partner.energy - 12, 0, 100)
         self.fertility = clamp(self.fertility - 11, 0, 100)
         partner.fertility = clamp(partner.fertility - 9, 0, 100)
+        self:recordNeed("reproduce", sim.tick, 10)
+        partner:recordNeed("reproduce", sim.tick, 9)
+        self:recordNeed("social", sim.tick, 3)
+        partner:recordNeed("social", sim.tick, 3)
         self.memory:record(partner.id, "help", 1, sim.tick)
         partner.memory:record(self.id, "help", 1, sim.tick)
         self.memory:record(child.id, "help", 4, sim.tick)
@@ -722,7 +924,7 @@ end
 
 function Agent:performFormCommunity(target, sim)
     sim:formOrJoinCommunity(self, target)
-    self.socialNeed = clamp(self.socialNeed - 18, 0, 100)
+    self.socialNeed = 0
     self.stress = clamp(self.stress - 7, 0, 100)
     self.aggression = clamp(self.aggression - 10, 0, 100)
     return true
@@ -759,6 +961,7 @@ function Agent:performWorship(shrine, sim)
     self.stress = clamp(self.stress - 12, 0, 100)
     self.aggression = clamp(self.aggression - 8, 0, 100)
     self.socialNeed = clamp(self.socialNeed - 6, 0, 100)
+    self.satisfaction = clamp((self.satisfaction or 50) + 3, 0, 100)
     return true
 end
 
@@ -826,7 +1029,8 @@ function Agent:tick(sim)
         self.planTicks = self.planTicks - 1
     end
 
-    context = context or { scarcity = 0, overcrowding = 0, nearby = 0, communitySupport = 0, foreignSettlementPressure = 0 }
+    context = context or { scarcity = 0, overcrowding = 0, nearby = 0, communitySupport = 0, foreignSettlementPressure = 0, diseasePressure = 0 }
+    context.tick = sim.tick
     self.lastContext = context
     self:updateNeeds(sim.world, context)
     self.action = action
@@ -897,6 +1101,9 @@ function Agent:tick(sim)
     end
 
     if done or self.planTicks <= 0 then
+        if done then
+            self:rewardTaskCompletion(action, sim)
+        end
         self:finishPlan()
     end
 
@@ -907,6 +1114,10 @@ function Agent:tick(sim)
     self.stress = clamp(self.stress, 0, 100)
     self.socialNeed = clamp(self.socialNeed, 0, 100)
     self.spirituality = clamp(self.spirituality, 0, 100)
+    self.disease = clamp(self.disease or 0, 0, 100)
+    self.satisfaction = clamp(self.satisfaction or 50, 0, 100)
+    self.purpose = clamp(self.purpose or 35, 0, 100)
+    self.rewardMemory = clamp(self.rewardMemory or 0, 0, 100)
     self.aggression = clamp(self.aggression, 0, 100)
     self.fertility = clamp(self.fertility + 0.12, 0, 100)
     self.currentSim = nil
@@ -948,6 +1159,13 @@ function Agent:draw()
         love.graphics.setColor(0.9, 0.88, 0.72, 0.95)
         love.graphics.line(px + 23, py + 9, px + 29, py + 3)
         love.graphics.line(px + 22, py + 10, px + 25, py + 13)
+    end
+
+    if self.currentDrawSelected then
+        love.graphics.setLineWidth(3)
+        love.graphics.setColor(1.0, 0.95, 0.25, 0.95)
+        love.graphics.rectangle("line", px + 3, py + 3, size - 6, size - 6)
+        love.graphics.setLineWidth(1)
     end
 
     love.graphics.setColor(0.1, 0.9, 0.25)

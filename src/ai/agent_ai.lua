@@ -191,6 +191,23 @@ end
 local function chooseFromLogits(agent, sim, logits, scores, valid, fallbackAction)
     local bestAction = fallbackAction
     local bestValue = -math.huge
+    local taskAction = ({
+        deposit = "useWarehouse",
+        stockpileFood = "searchFood",
+        stockpileWood = "gather",
+        stockpileStone = "gather",
+        buildHouse = "buildHouse",
+        buildFarm = "buildFarm",
+        buildPaddock = "buildPaddock",
+        buildMine = "buildMine",
+        buildShrine = "buildShrine",
+        craftGear = "craftGear",
+        raid = "attack",
+        attackBuilding = "attackBuilding",
+        explore = "explore",
+        reproduce = "reproduce"
+    })[agent.projectTask]
+    local survivalPressure = math.max(agent.hunger or 0, agent.thirst or 0, math.max(0, 26 - (agent.energy or 100)) * 3.2)
     for i, action in ipairs(ACTIONS) do
         if valid[action] then
             local value = logits[i]
@@ -200,7 +217,16 @@ local function chooseFromLogits(agent, sim, logits, scores, valid, fallbackActio
                 local repeatPenalty = action == agent.lastAiAction and math.min(0.28, (agent.aiRepeat or 0) * 0.045) or 0
                 value = base + noise - repeatPenalty
             end
-            value = value + clamp((scores[action] or 0) / 160, -0.25, 0.65)
+            -- The network ranks viable actions, but live simulation scores carry
+            -- hard local context such as fatigue, reachable targets and current
+            -- scarcity. Keep policy influence, while preventing stale training
+            -- priors from drowning urgent world feedback.
+            value = value * 0.75 + clamp((scores[action] or 0) / 85, -0.45, 1.5)
+            if taskAction == action and survivalPressure < 74 then
+                value = value + 2.4
+            elseif taskAction == action and survivalPressure < 88 then
+                value = value + 0.9
+            end
             value = value + (seededNoise(agent.aiSeed + 17, sim.tick, i) - 0.5) * 0.035
             if value > bestValue then
                 bestAction = action

@@ -1,7 +1,7 @@
 local Config = {}
 
 local defaults = {
-    version = "1.0.0",
+    version = "1.2.0",
     map = {
         width = 200,
         height = 128,
@@ -14,9 +14,12 @@ local defaults = {
         seed = nil
     },
     simulation = {
-        initialAgents = 150,
-        populationCap = 420,
-        tickStep = 0.18
+        initialAgents = 100,
+        populationCap = 600,
+        tickStep = 0.18,
+        agentProductivity = 2.0,
+        diseaseEnabled = true,
+        economyEnabled = true
     },
     resources = {
         forest = 1.0,

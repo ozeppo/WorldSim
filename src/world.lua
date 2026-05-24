@@ -6,7 +6,10 @@ World.__index = World
 
 World.TILE_SIZE = 32
 World.BOAT_COST = 10
+World.OCEAN_BOAT_COST = 24
 World.BOAT_DURABILITY = 28
+World.OCEAN_BOAT_DURABILITY = 44
+World.OCEAN_DURABILITY_COST = 3
 World.INDEX_SECTOR_SIZE = 8
 
 local function dist2(ax, ay, bx, by)
@@ -70,11 +73,26 @@ local function fitsBuildCandidate(world, x, y, kind)
                     return false
                 end
             elseif kind == "farm" then
-                if not tile or tile.type ~= Resources.TILE.grass or not world:hasWaterNear(xx, yy) then
+                if not tile or tile.type ~= Resources.TILE.grass then
                     return false
                 end
+            elseif kind == "port" then
+                if not tile or (tile.type ~= Resources.TILE.grass and tile.type ~= Resources.TILE.forest and tile.type ~= Resources.TILE.sand and tile.type ~= Resources.TILE.path) or not world:hasWaterNear(xx, yy) then
+                    return false
+                end
+            elseif kind == "house" then
+                if not tile or (tile.type ~= Resources.TILE.grass and tile.type ~= Resources.TILE.forest and tile.type ~= Resources.TILE.path) then
+                    return false
+                end
+                for ny = math.max(1, yy - 1), math.min(world.height, yy + 1) do
+                    for nx = math.max(1, xx - 1), math.min(world.width, xx + 1) do
+                        if world.tiles[ny][nx].type == Resources.TILE.house then
+                            return false
+                        end
+                    end
+                end
             else
-                if not tile or (tile.type ~= Resources.TILE.grass and tile.type ~= Resources.TILE.forest) then
+                if not tile or (tile.type ~= Resources.TILE.grass and tile.type ~= Resources.TILE.forest and tile.type ~= Resources.TILE.path) then
                     return false
                 end
             end
@@ -520,13 +538,20 @@ end
 
 function World:canEnter(x, y, agent)
     local tile = self:get(x, y)
-    if not tile or tile.type == Resources.TILE.rock or tile.type == Resources.TILE.ocean then
+    if not tile or tile.type == Resources.TILE.rock then
         return false
     end
-    if tile.type ~= Resources.TILE.water and tile.type ~= Resources.TILE.shallowWater then
+    if tile.type ~= Resources.TILE.water and tile.type ~= Resources.TILE.shallowWater and tile.type ~= Resources.TILE.ocean then
         return true
     end
-    return agent and ((agent.boatDurability or 0) > 0 or (agent.inventory and agent.inventory.wood >= World.BOAT_COST))
+    if not agent then
+        return false
+    end
+    if tile.type == Resources.TILE.ocean then
+        return (agent.oceanBoat and (agent.boatDurability or 0) > 0)
+            or (agent.inventory and agent.inventory.wood >= World.OCEAN_BOAT_COST)
+    end
+    return (agent.boatDurability or 0) > 0 or (agent.inventory and agent.inventory.wood >= World.BOAT_COST)
 end
 
 function World:neighbors(x, y)
@@ -547,7 +572,9 @@ function World:buildTerrainCaches()
                 for xx = math.max(1, x - 9), math.min(self.width, x + 9) do
                     local dx = xx - x
                     local dy = yy - y
-                    if dx * dx + dy * dy <= 81 and self.tiles[yy][xx].type == Resources.TILE.water then
+                    local waterType = self.tiles[yy][xx].type
+                    if dx * dx + dy * dy <= 81
+                        and (waterType == Resources.TILE.water or waterType == Resources.TILE.shallowWater or waterType == Resources.TILE.ocean) then
                         hasWater = true
                         break
                     end
@@ -623,8 +650,8 @@ end
 
 function World:rebuildBuildSiteIndex(tick)
     local sectorSize = self.index.sectorSize or World.INDEX_SECTOR_SIZE
-    local sites = { house = {}, farm = {}, paddock = {}, mine = {}, warehouse = {}, shrine = {} }
-    local kinds = { "house", "farm", "paddock", "mine", "warehouse", "shrine" }
+    local sites = { house = {}, farm = {}, paddock = {}, mine = {}, warehouse = {}, shrine = {}, port = {} }
+    local kinds = { "house", "farm", "paddock", "mine", "warehouse", "shrine", "port" }
 
     for y = 1, self.height do
         for x = 1, self.width do
@@ -728,7 +755,7 @@ end
 
 function World:nearestBuildSiteIndexed(sx, sy, kind, communityId, tick)
     self:ensureBuildSiteIndex(tick)
-    local radius = kind == "mine" and 14 or 10
+    local radius = kind == "mine" and 14 or (kind == "house" and 18 or 10)
     return self:nearestIndexed(self.index.buildSites[kind], sx, sy, radius, function(entry)
         return fitsBuildCandidate(self, entry.x, entry.y, kind)
     end)
@@ -1026,7 +1053,7 @@ function World:update(recountNow, growthSteps)
 end
 
 function World:recount()
-    local totals = { food = 0, wood = 0, stone = 0, iron = 0, animals = 0, farms = 0, paddocks = 0, mines = 0, houses = 0, warehouses = 0, shrines = 0 }
+    local totals = { food = 0, wood = 0, stone = 0, iron = 0, animals = 0, farms = 0, paddocks = 0, mines = 0, houses = 0, warehouses = 0, shrines = 0, ports = 0, paths = 0 }
     for y = 1, self.height do
         for x = 1, self.width do
             local tile = self.tiles[y][x]
@@ -1043,6 +1070,8 @@ function World:recount()
                 totals.mines = totals.mines + 1
             elseif tile.type == Resources.TILE.house then
                 totals.houses = totals.houses + 1
+            elseif tile.type == Resources.TILE.path then
+                totals.paths = totals.paths + 1
             end
         end
     end
@@ -1051,6 +1080,8 @@ function World:recount()
             totals.warehouses = totals.warehouses + 1
         elseif building.active ~= false and building.type == "shrine" then
             totals.shrines = totals.shrines + 1
+        elseif building.active ~= false and building.type == "port" then
+            totals.ports = totals.ports + 1
         end
     end
     self.totals = totals
@@ -1215,6 +1246,14 @@ function World:draw(communities, claims, claimEdges, camera)
                     Sprites.drawBuilding(tile.food > tile.maxFood * 0.45 and "farmFull" or "farmEmpty", px, py)
                 elseif tile.type == Resources.TILE.paddock then
                     Sprites.drawBuilding("paddock", px, py)
+                elseif tile.type == Resources.TILE.path then
+                    love.graphics.setColor(0.62, 0.52, 0.34)
+                    love.graphics.rectangle("fill", px + 10, py + 10, 12, 12)
+                elseif tile.type == Resources.TILE.port then
+                    love.graphics.setColor(0.34, 0.23, 0.13)
+                    love.graphics.rectangle("fill", px + 5, py + 10, 22, 13)
+                    love.graphics.setColor(0.78, 0.66, 0.38)
+                    love.graphics.rectangle("fill", px + 9, py + 6, 14, 6)
                 elseif tile.type == Resources.TILE.house then
                     Sprites.drawBuilding("house", px, py)
                     local building = tile.building

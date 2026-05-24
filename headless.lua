@@ -110,6 +110,9 @@ local function makeSimulation(config, options)
         initialAgents = options.agents or config.simulation.initialAgents,
         populationCap = options.cap or config.simulation.populationCap,
         tickStep = config.simulation.tickStep,
+        agentProductivity = config.simulation.agentProductivity,
+        diseaseEnabled = config.simulation.diseaseEnabled,
+        economyEnabled = config.simulation.economyEnabled,
         seed = options.seed or config.map.seed or (os.time() % 100000),
         world = {
             continents = config.map.continents,
@@ -125,7 +128,7 @@ end
 
 local function communityName(sim, id)
     local community = id and sim.communities[id]
-    return community and community.name or ("Community " .. tostring(id or "?"))
+    return community and community.name or ("Settlement " .. tostring(id or "?"))
 end
 
 local function projectKey(project)
@@ -144,7 +147,11 @@ local function describeProject(sim, community)
     local project = community.project or {}
     local kind = project.kind or "none"
 
-    if kind == "war" then
+    if kind == "micro" then
+        return community.name .. " - micro-management"
+    elseif kind == "founding" then
+        return community.name .. " - founding warehouse"
+    elseif kind == "war" then
         return community.name .. " - war with " .. communityName(sim, project.targetCommunityId)
     elseif kind == "armament" then
         return community.name .. " - arming against " .. communityName(sim, project.targetCommunityId)
@@ -194,7 +201,7 @@ local function printSummary(sim, startClock, lastReport)
     local structures = structureCounts(sim.world)
 
     print(string.format(
-        "[tick %d | %.1fs | %.1f ticks/s, %.1f recent] people=%d births=%d deaths=%d communities=%d structures=%d houses=%d farms=%d pens=%d mines=%d stores=%d shrines=%d",
+        "[tick %d | %.1fs | %.1f ticks/s, %.1f recent] people=%d births=%d deaths=%d settlements=%d nations=%d structures=%d houses=%d farms=%d pens=%d mines=%d stores=%d shrines=%d ports=%d routes=%d",
         sim.tick,
         elapsed,
         sim.tick / elapsed,
@@ -203,13 +210,22 @@ local function printSummary(sim, startClock, lastReport)
         sim.stats.births,
         sim.stats.deaths,
         sim:communityCount(),
+        sim.nationCount and sim:nationCount() or 0,
         structures.total,
         structures.house,
         structures.farm,
         structures.paddock,
         structures.mine,
         structures.warehouse,
-        structures.shrine
+        structures.shrine,
+        structures.port or 0,
+        sim.tradeRoutes and (function(routes)
+            local count = 0
+            for _ in pairs(routes) do
+                count = count + 1
+            end
+            return count
+        end)(sim.tradeRoutes) or 0
     ))
 
     lastReport.tick = sim.tick
@@ -230,7 +246,8 @@ local function monitorEvents(sim, state, mode)
             local key = projectKey(community.project)
             local old = state.communities[id]
             if not old then
-                printEvent(sim.tick, "New community: " .. community.name .. " members=" .. tostring(community.members))
+                local nation = community.nationId and sim.nations and sim.nations[community.nationId]
+                printEvent(sim.tick, "New settlement: " .. community.name .. " nation=" .. tostring(nation and nation.name or "-") .. " members=" .. tostring(community.members))
                 printEvent(sim.tick, describeProject(sim, community))
                 state.communities[id] = { name = community.name, project = key }
             elseif old.project ~= key then
@@ -244,7 +261,7 @@ local function monitorEvents(sim, state, mode)
     for id, old in pairs(state.communities) do
         local community = sim.communities[id]
         if not community or (community.members or 0) <= 0 then
-            printEvent(sim.tick, "Community collapsed: " .. old.name)
+            printEvent(sim.tick, "Settlement collapsed: " .. old.name)
             state.communities[id] = nil
         end
     end

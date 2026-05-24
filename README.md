@@ -1,20 +1,22 @@
-# SimWorld 1.0.0
+# SimWorld 1.2.0
 
-Systemowa symulacja zyjacego swiata 2D napisana w Lua dla frameworka LÖVE. To nie jest gra z celami ani progresja gracza: ludzie przezywaja, zakladaja osady, tworza spolecznosci, dziela zasoby, migruja, rozmnazaja sie i walcza w wyniku potrzeb, presji srodowiska, pamieci, granic oraz niedoborow.
+A systems-driven 2D living-world simulation written in Lua for the LÖVE framework.
 
-Uruchomienie:
+This is not a goal-based game and it has no player progression. Autonomous humans survive, settle, migrate, reproduce, form settlements and nations, share resources, trade, fight, collapse and recover through needs, memory, scarcity, proximity, claims and social pressure.
+
+Run the visual version:
 
 ```bash
 love .
 ```
 
-Tryb konsolowy high-performance, bez okna i grafiki:
+Run the high-performance console simulation:
 
 ```bash
 lua headless.lua
 ```
 
-Przydatne opcje:
+Useful headless options:
 
 ```bash
 lua headless.lua --ticks=5000 --report=250 --events=major
@@ -22,113 +24,162 @@ lua headless.lua --ticks=2000 --report=100 --events=all --seed=12345
 lua headless.lua --agents=250 --cap=700 --width=260 --height=160
 ```
 
-`--events=major` raportuje powstawanie/upadek spolecznosci i zmiany projektow, np. wojne. `--events=all` dodaje budowe i utrate struktur, a `--events=none` zostawia tylko okresowe statystyki swiata.
+`--events=major` reports settlement and nation events. `--events=all` adds construction/destruction events. `--events=none` keeps only periodic world summaries.
 
-## Struktura Projektu
+## Project Layout
 
 ```text
-main.lua                 graficzny punkt wejscia LÖVE
-headless.lua             konsolowy punkt wejscia high-performance
-conf.lua                 konfiguracja LÖVE
-simulation_config.json   parametry swiata i symulacji
+main.lua                 LÖVE visual entry point
+headless.lua             high-performance console entry point
+conf.lua                 LÖVE configuration
+simulation_config.json   world and simulation parameters
 src/
-  simulation.lua         glowna petla i orkiestracja systemow
-  world.lua              mapa, generacja, indeksy, pathfinding i rendering swiata
-  config.lua             loader JSON
-  entities/              agenci, pamiec i spolecznosci
-  systems/               zachowanie, budynki i zasoby
-  ai/                    runtime AI oraz wyeksportowana polityka
-  ui/                    debug UI i sprite'y
-agent-ai/                trening PyTorch i dokumentacja modelu
-assets/                  PNG dla agentow, zasobow i struktur
-developer-tools/         narzedzia do generowania assetow
+  simulation.lua         main simulation loop and system orchestration
+  world.lua              map generation, indexes, pathfinding and world rendering
+  config.lua             JSON config loader
+  entities/              agents, memory, settlements and nations
+  systems/               behavior, buildings and resources
+  ai/                    runtime AI and exported policies
+  ui/                    debug UI and sprites
+agent-ai/                PyTorch training and rollout collectors
+assets/                  PNG sprites for agents, resources and structures
+developer-tools/         asset generation tools
 ```
 
-## Konfiguracja
+## Configuration
 
-Podstawowe parametry swiata sa w pliku `simulation_config.json`.
+Core parameters live in `simulation_config.json`.
 
 ```json
 {
-  "version": "1.0.0",
+  "version": "1.2.0",
   "map": {
     "width": 200,
-    "height": 128,
+    "height": 200,
     "continents": 4,
     "continentScale": 1.0,
     "archipelagos": 8,
     "shallowWaterDepth": 3,
     "rivers": 12,
-    "lakes": 24,
+    "lakes": 14,
     "seed": null
   },
   "simulation": {
-    "initialAgents": 150,
-    "populationCap": 420,
-    "tickStep": 0.18
+    "initialAgents": 100,
+    "populationCap": 600,
+    "tickStep": 0.18,
+    "agentProductivity": 2.0,
+    "diseaseEnabled": true,
+    "economyEnabled": true
   },
   "resources": {
     "forest": 1.0,
     "rock": 0.75,
     "iron": 0.65,
-    "animals": 0.55
+    "animals": 0.30
   }
 }
 ```
 
-`seed: null` oznacza losowe ziarno przy starcie. Zwiekszanie mapy i populacji mocno podnosi koszt symulacji, bo agenci podejmuja decyzje, szukaja tras i oddzialuja ze strukturami oraz spolecznosciami.
+`seed: null` means a random seed on startup. Higher map size and population cap increase CPU cost because agents plan, pathfind, interact with memory, settlement AI, structures, claims and trade.
 
-## Aktualny Zakres
+## Current Scope
 
-- Duza mapa kafelkowa z kontynentami, archipelagami, oceanem, plytka woda przybrzezna, rzekami, mini-jeziorami, plazami, lasami, lakami, skalami, sniegiem i biomami zaleznymi od szerokosci mapy.
-- Ocean jest ciemniejszy i nieprzekraczalny nawet lodzia; plytka woda przybrzezna pozwala na zegluge, a zwykla woda sluzy do picia, farm i przepraw lodzia.
-- Zasoby sa rzadsze i bardziej przestrzenne: lasy tworza zwarte obszary, a pomiedzy nimi zostaja otwarte laki.
-- Autonomiczni agenci maja glod, pragnienie, energie, stres, potrzebe spoleczna, duchowosc, agresje, plodnosc, pamiec i relacje.
-- Spolecznosci dzialaja jak proste panstwa: maja projekty grupowe, dobrostan, duchowosc, granice, relacje dyplomatyczne, magazyny i wspolne zasoby.
-- Magazyny sa fizyczna logistyka: agent musi dojsc do magazynu, zeby odlozyc zebrane zasoby albo pobrac zasoby wspolne.
-- Osady rozwijaja domy, farmy, zagrody, kopalnie, magazyny i miejsca kultu.
-- Zasoby strategiczne obejmuja drewno, kamien, zelazo i zwierzeta.
-- Kopalnie powstaja na zlozach kamienia lub zelaza i wydobywaja je z rezerw zamiast odnawiac surowiec naturalnie.
-- Wojny wynikaja z relacji, zasobow i tarcia granicznego; obejmuja bron, zbroje, obrazenia, smierc i niszczenie konstrukcji.
-- Kamera obsluguje przesuwanie i przyblizanie, a UI pokazuje populacje, zasoby, claimy, akcje i szczegoly kliknietej spolecznosci.
-- Teren jest rysowany jako jednokolorowe kafle dla wydajnosci; pliki PNG w `assets` sa uzywane dla zasobow, budynkow, duzych struktur, agentow i ikon stanow.
-- Decyzje agentow moga byc wspierane przez mala siec neuronowa trenowana w PyTorch w `agent-ai`; wyeksportowane wagi sa ladowane przez `src/ai/agent_ai_policy.lua`.
-- `headless.lua` uruchamia te sama symulacje w konsoli, bez renderowania i bez LÖVE, wykonujac ticki tak szybko jak pozwala procesor.
+- Large tile world with continents, archipelagos, shallow coastal water, deep ocean, rivers, lakes, beaches, forests, grasslands, rock, snow and latitude-inspired biomes.
+- Terrain is rendered as flat-color tiles for performance. PNG assets in `assets` are used for agents, resources, structures and UI/state icons.
+- Autonomous agents have hunger, thirst, energy, stress, social need, spirituality, aggression, fertility, health, injury, disease, memory, relationships, satisfaction and purpose.
+- Agent needs are layered: survival first, then rest/social/reproduction, then higher-order reward from civic or national tasks.
+- Agents use a Lua-exported neural policy trained with PyTorch, combined with live simulation scores so urgent local context can override stale training priors.
+- Settlements are warehouse-centered. A warehouse creates a settlement; agents must physically reach a warehouse to deposit or withdraw shared resources.
+- Nations contain multiple settlements. A rich settlement can found a nation, and other settlements can join based on relation and benefit.
+- Settlement AI manages unaffiliated settlements. Nation AI manages all settlements that belong to a nation.
+- Micro-management replaced macro projects: AI assigns stable tasks to agents, such as `deposit`, `buildHouse`, `buildFarm`, `buildPaddock`, `buildMine`, `craftGear`, `raid`, `attackBuilding`, `explore` and `reproduce`.
+- Structures include houses, farms, paddocks, mines, warehouses, shrines and ports.
+- Strategic resources include food, animals, wood, stone and iron. Mines extract finite stone or iron reserves.
+- War emerges from bad relations, border claim friction, armament and resource pressure. Combat includes weapons, armor, injury, death and structure destruction.
+- Structural claims define borders: warehouses/shrines claim wider areas, houses claim medium areas, farms/paddocks/mines claim local areas.
+- Overcrowded but stable settlements can push small expedition groups outward, creating distant colonies and reducing local clustering.
+- Disease is a density-control system: crowded settlements build disease pressure, infect agents and reduce health/energy.
+- Proto-economy exists between settlements: settlements can build land paths or coastal ports, then exchange surplus resources depending on needs and relations.
+- Paths reduce land movement energy cost; ports enable sea-based trade between coastal settlements.
+- Deep ocean can be crossed with more expensive ocean boats, allowing island settlement and inter-island trade.
+- The visual UI supports camera pan/zoom, settlement and agent inspection, and tabbed debug views.
+- `headless.lua` runs the same simulation without rendering as fast as the CPU allows.
 
 ## Agent AI
 
-Model treningowy znajduje sie w `agent-ai/train_policy.py`. Uczy polityke decyzyjna premiujaca dobrostan/dostatek agenta, dzietnosc, rozwoj spolecznosci, gromadzenie zasobow oraz unikanie agresji bez projektu wojny lub realnej presji przetrwania. AI nie jest omijane w stanach krytycznych; ignorowanie glodu, pragnienia lub wyczerpania jest karane w nagrodzie treningowej.
+The agent policy is trained in `agent-ai/train_policy.py`. It rewards long-term survival margins, reproduction and settlement development without simply summing every wellbeing meter. The model can accept temporary hunger, fatigue or discomfort if it supports a stronger long-term outcome.
 
 ```bash
-python3 agent-ai/train_policy.py --epochs 22 --samples 100000 --batch-size 768 --seed 20260524
+lua agent-ai/collect_agent_rollouts.lua --runs=3 --ticks=420 --warmup=30 --sample-every=4 --agents=180 --cap=1000 --width=180 --height=180 --out=agent-ai/agent_real_states.csv --seed=73000
+python3 agent-ai/train_policy.py --real-data=agent-ai/agent_real_states.csv --epochs=24 --batch-size=768 --seed=20260526 --synthetic-ratio=0.20
 ```
 
-Eksport trafia do `src/ai/agent_ai_policy.lua`. Runtime LÖVE nie wymaga PyTorcha, bo inference odbywa sie w Lua. Kazdy agent ma wlasny `aiSeed` i drobna wariancje decyzyjna, zeby ograniczyc powtarzanie tych samych czynnosci. Ostatni trening: `100000` probek, `22` epoki, walidacja `0.8671`.
+The exported policy is loaded from `src/ai/agent_ai_policy.lua`. Runtime inference is pure Lua and does not require PyTorch.
 
-## Projekty Spoleczne
+## Nation AI
 
-- `stockpile`: niski zapas zasobow i ryzyko problemow w kolejnej fazie; dostepne dopiero po zbudowaniu magazynu.
-- `housing`: dobre zasoby i dobrostan; budowa domow, farm, zagrod oraz szybsze rozmnazanie.
-- `armament`: wrogosc wobec innej spolecznosci, ale za slabe wyposazenie wojenne.
-- `war`: srednio-wysokie zasoby oraz wrogosc; ataki na agentow i infrastrukture.
-- `exploration`: wysokie zasoby, duzo konstrukcji i wielu czlonkow; 2-4 agentow zaklada odlegla kolonie.
-- `buildWarehouse`: budowa magazynu i przejscie na wspolne zasoby.
-- `buildShrine`: niski poziom duchowosci kieruje spolecznosc ku miejscu kultu.
-- `develop`: wysoki dobrostan bez pilnej presji; rozbudowa osady.
+The national micro-management policy is trained in `agent-ai/train_nation_policy.py`. It assigns civic tasks based on settlement resources, population, infrastructure, claims, nearby resources, enemies and already-assigned tasks.
 
-## Changelog Do 1.0.0
+```bash
+lua agent-ai/collect_nation_rollouts.lua --runs=3 --ticks=460 --sample-every=5 --agents=180 --cap=900 --width=180 --height=180 --out=agent-ai/nation_real_states.csv --seed=62000
+python3 agent-ai/train_nation_policy.py --real-data=agent-ai/nation_real_states.csv --epochs=24 --batch-size=512 --seed=20260525
+```
 
-- Scalono dotychczasowe funkcje w wersje `1.0.0`.
-- Dodano plik `simulation_config.json` i loader konfiguracji w `src/config.lua`.
-- Powiekszono domyslna mape do `200x128` oraz podniesiono domyslna populacje startowa do `150`.
-- Przebudowano generator swiata z archipelagu na kontynenty.
-- Dodano biomy inspirowane ukladem planety: wiecej roslinnosci w srodkowych pasach, mniej na gorze i dole oraz snieg przy biegunach mapy.
-- Dodano rzeki, mini-jeziora, ocean oraz piasek w pasie 1-3 kafli przy wodzie.
-- Rozdzielono ocean, plytka wode i zwykla wode: ocean jest bariera, plytka woda jest zeglowna, a rzeki i jeziora pozostaja zasobem strategicznym.
-- Dodano generowanie malych wysp i archipelagow.
-- Ujednolicono rendering obiektow na assetach PNG: `building_tiles.png`, `resource_states.png`, `warehouse_large.png`, `shrine_large.png` oraz arkusze agenta. Teren pozostaje prostymi kolorowymi kaflami.
-- Poprawiono zachowanie agentow na duzej mapie: rozproszony start w klastrach, wiekszy zasieg szukania tras i zasobow, fallback dla utknietych planow oraz mniejsza sklonnosc do desperackich atakow.
-- Dodano pipeline PyTorch dla polityki agentow, eksport wag do Lua i runtime inference bez zaleznosci od Pythona.
-- Dodano tryb konsolowy high-performance w `headless.lua` z okresowymi statystykami i raportowaniem wydarzen spolecznosci.
-- Urealniono magazyny: zasoby nie teleportuja sie do wspolnego store, a pobieranie i deponowanie wymaga fizycznej obecnosci agenta przy magazynie.
-- Zachowano systemy osad, spolecznosci, claimow strukturalnych, magazynow, duchowosci, kopalni, zwierzat, zbrojen i wojen.
+The exported policy is loaded from `src/ai/nation_ai_policy.lua`. Nation AI does not directly move agents; it assigns stable tasks, and the agent behavior system converts those tasks into concrete actions.
+
+## Changelog
+
+### 1.2.0
+
+- Added configurable `agentProductivity`. One simulated agent can now represent more economic output, allowing similar development with fewer live agents.
+- Added disease as a population-density control system. Crowded settlements build disease pressure, agents can become sick, and sickness reduces health and energy.
+- Added settlement-level disease stats: pressure and infected count.
+- Added roads/paths as intentional infrastructure between settlements. Paths are carved into terrain and reduce land movement energy cost.
+- Added ports as coastal structures.
+- Added proto-economy: settlements connected by paths, or by ports, can exchange surplus resources based on need and relationship level.
+- Added trade-route tracking and headless reporting for ports/routes.
+- Added economic route construction that consumes settlement warehouse resources.
+- Added stronger pressure for overcrowded, stable settlements to send expedition groups outward.
+- Adjusted settlement joining/founding behavior so agents prefer nearby viable settlements but can still found distant new cores.
+- Relaxed farm placement consistency so farm indexing and farm construction use the same rules.
+- Reduced default population pressure by setting the default simulation to fewer starting agents and lower cap, balanced by higher productivity.
+- Updated README to English and promoted the project documentation to version `1.2.0`.
+
+### 1.1.0
+
+- Added nations above settlements. A settlement is a warehouse-centered local population; a nation can own multiple settlements.
+- Exploration now creates colonies that can remain positively related to their parent settlement/nation.
+- Added separate Nation AI in `src/ai/nation_ai.lua` for micro-management.
+- Added `src/ai/nation_ai_policy.lua` and PyTorch training in `agent-ai/train_nation_policy.py`.
+- Replaced settlement macro-projects with stable micro-task assignment.
+- Added local settlement AI for settlements without a nation.
+- Nations no longer appear automatically with the first warehouse. They form only after a settlement is wealthy and populated enough.
+- Other settlements can join existing nations based on relation and practical benefit.
+- Added deeper agent need/reward logic: need clocks for food, water, rest, social interaction and reproduction, plus satisfaction and purpose.
+- Reworked agent decision flow toward `Idle > decide > execute > Idle`.
+- Retrained Agent AI and Nation AI after the need/reward and micro-task changes.
+- Nation AI now considers already-assigned citizen tasks to avoid flooding one role.
+- Nation AI reward moved away from raw warehouse stockpiles and toward claims/territorial control.
+- Border conflicts can trigger armament, structure attacks and raids without a manual war project.
+- Added real-rollout collection for Nation AI and Agent AI.
+- Improved UI readability with tabs, icons, agent inspection and settlement inspection.
+- Added ocean travel with more expensive ocean boats.
+- Added responsive LÖVE window behavior.
+- Improved logistics: agents must physically reach warehouses to deposit or withdraw shared resources.
+- Improved population stability after Nation AI changes by allowing housing pressure to emerge naturally from children.
+- Added headless high-performance console simulation.
+
+### 1.0.0
+
+- Added configurable world generation through `simulation_config.json`.
+- Added continents, archipelagos, rivers, lakes, shallow water, deep ocean, beaches, forests, grasslands, rocks, snow and latitude-inspired biomes.
+- Added autonomous agents with needs, memory, trust, relationships, fertility, aggression and social behavior.
+- Added settlements, structural claims, warehouses, houses, farms, paddocks, mines, shrines, spirituality and shared storage.
+- Added animals, iron, stone, wood and food resources.
+- Added finite stone/iron deposits with mine construction.
+- Added weapons, armor, combat, injuries, death and building destruction.
+- Added camera zoom/pan and debug overlays.
+- Added asset-based sprites for agents, resources and structures while keeping terrain color-only for performance.
+- Added PyTorch training pipeline and Lua policy export for Agent AI.
+- Added high-performance `headless.lua` mode.
